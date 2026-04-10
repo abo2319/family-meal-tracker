@@ -195,25 +195,18 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 .photo-zone.filled .photo-del { display: block; }
 
 /* Nutrition inputs */
-.nutri-grid {
-  display: grid; grid-template-columns: repeat(3, minmax(0,1fr));
-  gap: 10px; padding: 12px 16px;
-}
-.nf label { font-size: 11px; color: var(--gray-400); display: block; margin-bottom: 5px; }
-.nf input {
-  width: 100%; padding: 10px 8px; border-radius: var(--radius-sm);
-  border: 1.5px solid var(--gray-200); font-size: 18px; font-weight: 600;
-  text-align: center; background: #fff; color: var(--gray-900);
-  font-family: 'Noto Sans TC', sans-serif;
-  -webkit-appearance: none; appearance: none;
-}
-.nf input:focus { outline: none; }
-.nf.carb input:focus { border-color: var(--coral); }
-.nf.pro  input:focus { border-color: var(--green); }
-.nf.fat  input:focus { border-color: var(--amber); }
-.nf.carb label { color: var(--coral); }
-.nf.pro  label { color: var(--green); }
-.nf.fat  label { color: var(--amber); }
+.food-item-row { display:grid; grid-template-columns:1fr 56px 56px 56px 32px; gap:6px; align-items:center; }
+.fi-name { width:100%; padding:8px 10px; border:1.5px solid var(--gray-200); border-radius:var(--radius-sm); font-size:13px; background:#fff; color:var(--gray-900); font-family:inherit; }
+.fi-name:focus { outline:none; border-color:var(--green); }
+.fi-carb,.fi-pro,.fi-fat { width:100%; padding:8px 4px; border:1.5px solid var(--gray-200); border-radius:var(--radius-sm); font-size:14px; font-weight:600; text-align:center; background:#fff; color:var(--gray-900); font-family:inherit; -webkit-appearance:none; }
+.fi-carb:focus { outline:none; border-color:var(--coral); }
+.fi-pro:focus  { outline:none; border-color:var(--green); }
+.fi-fat:focus  { outline:none; border-color:var(--amber); }
+.fi-del { width:28px; height:28px; border-radius:50%; border:none; background:var(--gray-100); color:var(--gray-600); font-size:18px; cursor:pointer; flex-shrink:0; line-height:1; }
+.fi-del:active { background:var(--gray-200); }
+.fi-header { display:grid; grid-template-columns:1fr 56px 56px 56px 32px; gap:6px; padding:0 0 4px; }
+.fi-header span { font-size:10px; color:var(--gray-400); text-align:center; }
+.fi-header span:first-child { text-align:left; }
 
 .note-row { padding: 0 16px; }
 .note-row input {
@@ -364,7 +357,7 @@ const FOLDER_NAME = 'FamilyMealTracker';
 let tokenClient, accessToken = null;
 let currentDate = new Date();
 let currentMember = '';
-let members = JSON.parse(localStorage.getItem('members') || '["爸爸","媽媽","小孩"]');
+let members = JSON.parse(localStorage.getItem('members') || '["Poppy","Mom","Max","Grace","Angela","Ning","Dean"]');
 let localData = JSON.parse(localStorage.getItem('mealData') || '{}');
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
@@ -522,16 +515,49 @@ function saveMeal(mealId) {
   const k = dateKey();
   if (!localData[k]) localData[k] = {};
   const m = localData[k][mealId] || {};
-  m.carb = parseFloat(document.getElementById(mealId+'-carb').value) || 0;
-  m.pro  = parseFloat(document.getElementById(mealId+'-pro').value)  || 0;
-  m.fat  = parseFloat(document.getElementById(mealId+'-fat').value)  || 0;
+  // Sum up all food items
+  let totalCarb = 0, totalPro = 0, totalFat = 0;
+  const items = getFoodItems(mealId);
+  items.forEach(item => {
+    totalCarb += parseFloat(item.carb) || 0;
+    totalPro  += parseFloat(item.pro)  || 0;
+    totalFat  += parseFloat(item.fat)  || 0;
+  });
+  m.carb = totalCarb;
+  m.pro  = totalPro;
+  m.fat  = totalFat;
   m.note = document.getElementById(mealId+'-note').value;
+  m.items = items;
   localData[k][mealId] = m;
   localStorage.setItem('mealData', JSON.stringify(localData));
   updateSummary();
   updateBadge(mealId);
-  toast('已儲存！');
+  // Haptic feedback
+  if (navigator.vibrate) navigator.vibrate(40);
+  // Button animation
+  const btn = document.querySelector(`#${mealId}-card .btn-save`);
+  if (btn) {
+    btn.textContent = '✓ 已儲存！';
+    btn.style.background = '#0F6E56';
+    setTimeout(() => { btn.textContent = '儲存這餐'; btn.style.background = ''; }, 1800);
+  }
   setSyncPending();
+}
+
+function getFoodItems(mealId) {
+  const container = document.getElementById(mealId+'-items');
+  if (!container) return [];
+  const rows = container.querySelectorAll('.food-item-row');
+  const items = [];
+  rows.forEach(row => {
+    items.push({
+      name: row.querySelector('.fi-name').value,
+      carb: row.querySelector('.fi-carb').value,
+      pro:  row.querySelector('.fi-pro').value,
+      fat:  row.querySelector('.fi-fat').value,
+    });
+  });
+  return items;
 }
 
 // ─── PHOTO ───────────────────────────────────────────────────────
@@ -559,8 +585,9 @@ function handlePhoto(mealId, input) {
           toast('上傳照片至 Drive...');
           const fid = await ensureFolder();
           const dateStr = currentDate.toISOString().slice(0,10);
-          const fname = `${currentMember}_${dateStr}_${mealId}.jpg`;
-          await uploadPhoto(fid, fname, e.target.result);
+          const photoFid = await ensurePhotoFolder(fid, dateStr);
+          const fname = `${currentMember}_${mealId}.jpg`;
+          await uploadPhoto(photoFid, fname, e.target.result);
           toast('照片已存至 Drive ✓');
         } catch(err) {
           console.error('Photo upload error:', err);
@@ -615,13 +642,14 @@ function render() {
           <button class="photo-del" onclick="removePhoto('${m.id}',event)">移除</button>
         </div>
         <input type="file" accept="image/*" style="display:none" id="${m.id}-file" onchange="handlePhoto('${m.id}',this)">
-        <div class="nutri-grid">
-          <div class="nf carb"><label>碳水化合物 (g)</label><input type="number" min="0" id="${m.id}-carb" placeholder="0" value="${meal.carb||''}"></div>
-          <div class="nf pro"><label>蛋白質 (g)</label><input type="number" min="0" id="${m.id}-pro" placeholder="0" value="${meal.pro||''}"></div>
-          <div class="nf fat"><label>脂肪 (g)</label><input type="number" min="0" id="${m.id}-fat" placeholder="0" value="${meal.fat||''}"></div>
+        <div id="${m.id}-items" style="padding:12px 16px 0;display:flex;flex-direction:column;gap:8px;">
+          ${renderFoodItems(m.id, meal.items)}
         </div>
-        <div class="note-row" style="margin-bottom:10px">
-          <input type="text" id="${m.id}-note" placeholder="餐點名稱或備註..." value="${meal.note||''}">
+        <div style="padding:8px 16px 0;">
+          <button onclick="addFoodItem('${m.id}')" style="width:100%;padding:9px;border:1.5px dashed var(--gray-200);border-radius:var(--radius-sm);background:none;color:var(--gray-400);font-size:14px;cursor:pointer;font-family:inherit;">＋ 新增食物</button>
+        </div>
+        <div class="note-row" style="margin:10px 16px 0;padding:0;">
+          <input type="text" id="${m.id}-note" placeholder="備註..." value="${meal.note||''}">
         </div>
         <div class="save-row">
           <button class="btn-save" onclick="saveMeal('${m.id}')">儲存這餐</button>
@@ -634,6 +662,60 @@ function render() {
 
 function toggleCard(mealId) {
   document.getElementById(mealId+'-card').classList.toggle('open');
+}
+
+function renderFoodItems(mealId, items) {
+  const list = (items && items.length > 0) ? items : [{ name:'', carb:'', pro:'', fat:'' }];
+  const header = `<div class="fi-header"><span>食物名稱</span><span style="color:var(--coral)">碳水</span><span style="color:var(--green)">蛋白</span><span style="color:var(--amber)">脂肪</span><span></span></div>`;
+  const rows = list.map((item, i) => `
+    <div class="food-item-row">
+      <input class="fi-name" type="text" placeholder="食物名稱" value="${item.name||''}" oninput="updateTotal('${mealId}')">
+      <input class="fi-carb" type="number" min="0" placeholder="0" value="${item.carb||''}" oninput="updateTotal('${mealId}')">
+      <input class="fi-pro"  type="number" min="0" placeholder="0" value="${item.pro||''}"  oninput="updateTotal('${mealId}')">
+      <input class="fi-fat"  type="number" min="0" placeholder="0" value="${item.fat||''}"  oninput="updateTotal('${mealId}')">
+      <button class="fi-del" onclick="delFoodItem(this, '${mealId}')" title="刪除">×</button>
+    </div>`).join('');
+  return header + rows;
+}
+
+function addFoodItem(mealId) {
+  const container = document.getElementById(mealId+'-items');
+  const row = document.createElement('div');
+  row.className = 'food-item-row';
+  row.innerHTML = `
+    <input class="fi-name" type="text" placeholder="食物名稱" oninput="updateTotal('${mealId}')">
+    <input class="fi-carb" type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
+    <input class="fi-pro"  type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
+    <input class="fi-fat"  type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
+    <button class="fi-del" onclick="delFoodItem(this, '${mealId}')" title="刪除">×</button>`;
+  container.appendChild(row);
+  if (navigator.vibrate) navigator.vibrate(20);
+  row.querySelector('.fi-name').focus();
+}
+
+function delFoodItem(btn, mealId) {
+  const container = document.getElementById(mealId+'-items');
+  const rows = container.querySelectorAll('.food-item-row');
+  if (rows.length <= 1) {
+    // Clear instead of delete if only one row
+    btn.closest('.food-item-row').querySelectorAll('input').forEach(i => i.value = '');
+  } else {
+    btn.closest('.food-item-row').remove();
+  }
+  updateTotal(mealId);
+}
+
+function updateTotal(mealId) {
+  const items = getFoodItems(mealId);
+  let tc=0, tp=0, tf=0;
+  items.forEach(i => { tc+=parseFloat(i.carb)||0; tp+=parseFloat(i.pro)||0; tf+=parseFloat(i.fat)||0; });
+  // Show running total on save button
+  const btn = document.querySelector(`#${mealId}-card .btn-save`);
+  if (btn && (tc||tp||tf)) {
+    btn.textContent = `儲存這餐（碳${Math.round(tc)} 蛋${Math.round(tp)} 脂${Math.round(tf)}g）`;
+  } else if (btn) {
+    btn.textContent = '儲存這餐';
+  }
 }
 
 function updateBadge(mealId) {
@@ -668,6 +750,23 @@ function updateSummary() {
 }
 
 // ─── GOOGLE DRIVE ────────────────────────────────────────────────
+async function ensurePhotoFolder(parentId, dateStr) {
+  const folderName = 'photos_' + dateStr;
+  const search = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+    { headers: { Authorization: 'Bearer ' + accessToken } }
+  );
+  const sd = await search.json();
+  if (sd.files && sd.files.length > 0) return sd.files[0].id;
+  const create = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: folderName, parents: [parentId], mimeType: 'application/vnd.google-apps.folder' })
+  });
+  const cd = await create.json();
+  return cd.id;
+}
+
 async function ensureFolder() {
   if (driveFolderId) return driveFolderId;
   // Search for existing folder
