@@ -553,11 +553,18 @@ function handlePhoto(mealId, input) {
     toast('照片已上傳！');
     // Upload photo to Drive
     if (accessToken) {
-      toast('上傳照片至 Drive...');
-      const fid = await ensureFolder();
-      const dateStr = currentDate.toISOString().slice(0,10);
-      await uploadPhoto(fid, `${currentMember}_${dateStr}_${mealId}.jpg`, e.target.result);
-      toast('照片已存至 Drive！');
+      setTimeout(async () => {
+        try {
+          toast('上傳照片至 Drive...');
+          const fid = await ensureFolder();
+          const dateStr = currentDate.toISOString().slice(0,10);
+          await uploadPhoto(fid, `${currentMember}_${dateStr}_${mealId}.jpg`, e.target.result);
+          toast('照片已存至 Drive ✓');
+        } catch(err) {
+          console.error('Photo upload failed:', err);
+          toast('照片存本機，Drive 上傳失敗：' + err.message);
+        }
+      }, 500);
     }
   };
   reader.readAsDataURL(file);
