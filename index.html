@@ -380,38 +380,59 @@ function initGoogle() {
     client_id: CLIENT_ID,
     scope: SCOPES,
     callback: async (resp) => {
-      if (resp.error) { toast('登入失敗：' + resp.error); return; }
+      if (resp.error) {
+        console.error('OAuth error:', resp);
+        toast('登入失敗：' + resp.error);
+        return;
+      }
       accessToken = resp.access_token;
+      // Store token with expiry time (tokens last ~1hr)
+      const expiry = Date.now() + (resp.expires_in || 3600) * 1000;
       localStorage.setItem('accessToken', accessToken);
-      await loadUserInfo();
-      showApp();
+      localStorage.setItem('tokenExpiry', expiry.toString());
+      try {
+        await loadUserInfo();
+        showApp();
+      } catch(e) {
+        console.error('loadUserInfo failed:', e);
+        toast('取得使用者資訊失敗，請重試');
+      }
     }
   });
 }
 
 async function signIn() {
+  // Check if we have a valid saved token
   const saved = localStorage.getItem('accessToken');
-  if (saved) {
+  const expiry = parseInt(localStorage.getItem('tokenExpiry') || '0');
+  if (saved && Date.now() < expiry - 60000) {
     accessToken = saved;
     try {
       await loadUserInfo();
-      showApp(); return;
-    } catch(e) { localStorage.removeItem('accessToken'); }
+      showApp();
+      return;
+    } catch(e) {
+      // Token invalid, clear and re-login
+      localStorage.removeItem('accessToken');
+      localStorage.removeItem('tokenExpiry');
+    }
   }
-  tokenClient.requestAccessToken({ prompt: 'consent' });
+  // Always use 'select_account' to avoid silent loop
+  tokenClient.requestAccessToken({ prompt: 'select_account' });
 }
 
 async function loadUserInfo() {
   const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
     headers: { Authorization: 'Bearer ' + accessToken }
   });
-  if (!r.ok) throw new Error('token expired');
+  if (!r.ok) throw new Error('token invalid: ' + r.status);
   userInfo = await r.json();
 }
 
 function signOut() {
-  google.accounts.oauth2.revoke(accessToken);
+  if (accessToken) google.accounts.oauth2.revoke(accessToken);
   localStorage.removeItem('accessToken');
+  localStorage.removeItem('tokenExpiry');
   accessToken = null; userInfo = null;
   document.getElementById('app').classList.remove('visible');
   document.getElementById('login-screen').style.display = 'flex';
