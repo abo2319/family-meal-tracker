@@ -15,11 +15,11 @@
 7. 應用程式類型選「網頁應用程式」
 8. 已授權的 JavaScript 來源，填入：
    ```
-   https://<>.github.io
+   https://abo2319.github.io
    ```
 9. 已授權的重新導向 URI，填入：
    ```
-   https://<>.github.io/family-meal-tracker/
+   https://abo2319.github.io/family-meal-tracker/
    ```
 10. 點「建立」→ 複製 Client ID（格式：xxxxxxx.apps.googleusercontent.com）
 

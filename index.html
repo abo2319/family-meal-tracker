@@ -355,15 +355,15 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────
-const CLIENT_ID = '832186580342-vp1jh1m1c95duqo4gp879bg24htitvts.apps.googleusercontent.com';
-const SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.profile openid';
+const CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_HERE';
+const SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const FOLDER_NAME = 'FamilyMealTracker';
 
 // ─── STATE ───────────────────────────────────────────────────────
 let tokenClient, accessToken = null;
 let currentDate = new Date();
 let currentMember = '';
-let members = JSON.parse(localStorage.getItem('members') || '["Poppy","Mom","Grace", "Max", "Angela", "Dean"]');
+let members = JSON.parse(localStorage.getItem('members') || '["爸爸","媽媽","小孩"]');
 let localData = JSON.parse(localStorage.getItem('mealData') || '{}');
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
@@ -550,7 +550,7 @@ function handlePhoto(mealId, input) {
     localStorage.setItem('mealData', JSON.stringify(localData));
     updateBadge(mealId);
     setSyncPending();
-    toast('照片已上傳！');
+    toast('照片已儲存！');
     // Upload photo to Drive
     if (accessToken) {
       setTimeout(async () => {
@@ -558,13 +558,14 @@ function handlePhoto(mealId, input) {
           toast('上傳照片至 Drive...');
           const fid = await ensureFolder();
           const dateStr = currentDate.toISOString().slice(0,10);
-          await uploadPhoto(fid, `${currentMember}_${dateStr}_${mealId}.jpg`, e.target.result);
+          const fname = `${currentMember}_${dateStr}_${mealId}.jpg`;
+          await uploadPhoto(fid, fname, e.target.result);
           toast('照片已存至 Drive ✓');
         } catch(err) {
-          console.error('Photo upload failed:', err);
-          toast('照片存本機，Drive 上傳失敗：' + err.message);
+          console.error('Photo upload error:', err);
+          toast('Drive 上傳失敗: ' + (err.message||err));
         }
-      }, 500);
+      }, 300);
     }
   };
   reader.readAsDataURL(file);
@@ -612,7 +613,7 @@ function render() {
           <div class="photo-ph"><span class="cam">📷</span><span>點擊拍照或上傳</span></div>
           <button class="photo-del" onclick="removePhoto('${m.id}',event)">移除</button>
         </div>
-        <input type="file" accept="image/*" capture="environment" style="display:none" id="${m.id}-file" onchange="handlePhoto('${m.id}',this)">
+        <input type="file" accept="image/*" style="display:none" id="${m.id}-file" onchange="handlePhoto('${m.id}',this)">
         <div class="nutri-grid">
           <div class="nf carb"><label>碳水化合物 (g)</label><input type="number" min="0" id="${m.id}-carb" placeholder="0" value="${meal.carb||''}"></div>
           <div class="nf pro"><label>蛋白質 (g)</label><input type="number" min="0" id="${m.id}-pro" placeholder="0" value="${meal.pro||''}"></div>
@@ -703,22 +704,23 @@ async function uploadJSON(folderId, filename, data) {
   const meta = { name: filename, parents: [folderId] };
 
   if (sd.files && sd.files.length > 0) {
-    // Update
+    // Update existing file - use media endpoint with PATCH
     const fileId = sd.files[0].id;
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify({})], { type: 'application/json' }));
-    form.append('file', blob);
-    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
-      method: 'PATCH', headers: { Authorization: 'Bearer ' + accessToken }, body: form
+    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+      method: 'PATCH',
+      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: content
     });
+    if (!res.ok) throw new Error('Update failed: ' + res.status + ' ' + await res.text());
   } else {
-    // Create
+    // Create new file
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
     form.append('file', blob);
-    await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
       method: 'POST', headers: { Authorization: 'Bearer ' + accessToken }, body: form
     });
+    if (!res.ok) throw new Error('Create failed: ' + res.status + ' ' + await res.text());
   }
 }
 
