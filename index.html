@@ -353,9 +353,10 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 
 <div class="toast" id="toast"></div>
 
+<script src="config.js"></script>
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────
-const CLIENT_ID = 'YOUR_GOOGLE_CLIENT_ID_HERE';
+const CLIENT_ID = CONFIG.CLIENT_ID;
 const SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const FOLDER_NAME = 'FamilyMealTracker';
 
