@@ -231,6 +231,32 @@ button:active,
 .quick-chip.fav-chip:active { background: #FCE8CA; }
 .quick-chip.copy-chip { background: #E1F5EE; border-color: #9BDCC4; color: var(--green-dark); font-weight: 600; }
 .quick-chip.copy-chip:active { background: #B8EFDD; }
+.quick-chip.tpl-chip  { background: #EDE9FE; border-color: #C4B5FD; color: #5B21B6; font-weight: 600; }
+.quick-chip.tpl-chip:active { background: #DDD6FE; }
+
+/* M3: inline "save as template" mini-button next to 儲存這餐 */
+.save-row-wrap { display: flex; gap: 8px; padding: 12px 16px 16px; }
+.save-row-wrap .btn-save { flex: 1; padding: 14px; background: var(--green); color: #fff; border: 0; border-radius: 12px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; }
+.save-row-wrap .btn-save:active { background: var(--green-dark); transform: scale(0.98); }
+.btn-save-template {
+  flex: 0 0 auto; padding: 0 14px;
+  background: #EDE9FE; color: #5B21B6; border: 1px solid #C4B5FD;
+  border-radius: 12px; font-size: 13px; font-weight: 600;
+  font-family: inherit; cursor: pointer;
+}
+.btn-save-template:active { background: #DDD6FE; transform: scale(0.96); }
+
+/* M6: floating save button above the mobile keyboard */
+.floating-save {
+  position: fixed; left: 12px; right: 12px; bottom: 12px;
+  padding: 14px; background: var(--green); color: #fff;
+  border: 0; border-radius: 14px;
+  font-size: 16px; font-weight: 700; font-family: inherit;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+  z-index: 400; display: none;
+  transition: transform 0.08s ease-out;
+}
+.floating-save:active { transform: scale(0.97); background: var(--green-dark); }
 
 /* ── Dish Cards ── */
 .dish-card {
@@ -890,6 +916,14 @@ if (localData == null || typeof localData !== 'object' || Array.isArray(localDat
 let localProfiles = safeParse('profiles', {}, '個人資料');
 if (!localProfiles || typeof localProfiles !== 'object' || Array.isArray(localProfiles)) {
   localProfiles = {};
+}
+// M3: Meal templates. Keyed by id → { name, dishes, member, createdAt }.
+// Synced via the shared Drive file as a sibling of profiles. Accessible
+// to all family members for cross-pollination (Mom's 便當 can become
+// Dean's 便當 with one tap).
+let localTemplates = safeParse('templates', {}, '餐點範本');
+if (!localTemplates || typeof localTemplates !== 'object' || Array.isArray(localTemplates)) {
+  localTemplates = {};
 }
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
@@ -1814,12 +1848,21 @@ function mealNameById(id) {
 function renderQuickAddRow(mealId, meal) {
   var favs = _quickAdd.favs;
   var sources = _quickAdd.sources[mealId] || [];
+  var templates = _quickAdd.templates || [];
   var showCopy = !hasMealData(meal);
-  if (favs.length === 0 && !(showCopy && sources.length > 0)) return '';
+  if (favs.length === 0 && templates.length === 0 && !(showCopy && sources.length > 0)) return '';
   var parts = [];
   if (showCopy && sources.length > 0) {
     sources.forEach(function(s, i) {
       parts.push('<button class="quick-chip copy-chip" onclick="quickCopy(\'' + mealId + '\',' + i + ')">↻ ' + escAttr(s.label) + '</button>');
+    });
+  }
+  // M3: Template chips — purple, always visible
+  if (templates.length > 0) {
+    parts.push('<span class="quick-label">範本：</span>');
+    templates.forEach(function(t, i) {
+      var shortName = t.name.length > 10 ? t.name.slice(0, 9) + '…' : t.name;
+      parts.push('<button class="quick-chip tpl-chip" onclick="applyTemplate(\'' + mealId + '\',\'' + escAttr(t.id) + '\')">📋 ' + escAttr(shortName) + '</button>');
     });
   }
   if (favs.length > 0) {
@@ -1830,6 +1873,71 @@ function renderQuickAddRow(mealId, meal) {
     });
   }
   return '<div class="quick-add-row">' + parts.join('') + '</div>';
+}
+
+// M3: Save current meal as a named template
+function saveAsTemplate(mealId) {
+  harvestVisibleDishes();
+  var meal = getMeal(mealId);
+  if (!hasMealData(meal)) { toast('目前沒有可儲存的內容'); return; }
+  var defaultName = mealNameById(mealId) + ' 範本';
+  var name = prompt('範本名稱（例：媽媽的便當）', defaultName);
+  if (!name || !name.trim()) return;
+  var id = 'tpl_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+  localTemplates[id] = {
+    id: id,
+    name: name.trim(),
+    // Clone dishes WITHOUT photos to keep the shared file small.
+    dishes: (meal.dishes || []).map(function(d) {
+      return {
+        photo: '',
+        items: (d.items || []).map(function(it) {
+          return { name: it.name || '', carb: it.carb || 0, pro: it.pro || 0, fat: it.fat || 0 };
+        })
+      };
+    }).filter(function(d) { return d.items.length > 0; }),
+    member: currentMember || '',
+    mealType: mealId,
+    createdAt: new Date().toISOString()
+  };
+  try { localStorage.setItem('templates', JSON.stringify(localTemplates)); } catch(_) {}
+  setSyncPending();
+  render();
+  toast('範本「' + name.trim() + '」已儲存 ✓');
+}
+
+// M3: Apply a saved template to the current meal
+function applyTemplate(mealId, tplId) {
+  var tpl = localTemplates[tplId];
+  if (!tpl) { toast('找不到範本'); return; }
+  var meal = getMeal(mealId);
+  if (hasMealData(meal)) {
+    if (!confirm('套用「' + tpl.name + '」會覆蓋目前內容，確定嗎？')) return;
+  }
+  harvestVisibleDishes();
+  var clonedDishes = (tpl.dishes || []).map(function(d) {
+    return {
+      photo: '',
+      items: (d.items || []).map(function(it) {
+        return { name: it.name || '', carb: it.carb || 0, pro: it.pro || 0, fat: it.fat || 0 };
+      })
+    };
+  });
+  if (clonedDishes.length === 0) { toast('範本沒有任何菜'); return; }
+  var target = getMeal(mealId);
+  target.dishes = clonedDishes;
+  var k = dateKey();
+  if (!localData[k]) localData[k] = {};
+  localData[k][mealId] = target;
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+  var cardEl = document.getElementById(mealId + '-card');
+  if (cardEl) cardEl.classList.add('open');
+  rerenderDishes(mealId);
+  updateSaveBtnTotal(mealId);
+  updateBadge(mealId);
+  updateSummary();
+  setSyncPending();
+  toast('已套用範本「' + tpl.name + '」');
 }
 
 function quickAddFav(mealId, idx) {
@@ -1907,6 +2015,13 @@ function render() {
   _quickAdd.favs = computeFavorites(currentMember, 6);
   _quickAdd.sources = {};
   MEALS_DEF.forEach(function(m) { _quickAdd.sources[m.id] = computeCopySources(m.id); });
+  // M3: surface up to 5 templates, newest first. Everyone's templates are
+  // visible (cross-family sharing) so Mom's 便當 can seed Dean's day.
+  _quickAdd.templates = Object.keys(localTemplates)
+    .map(function(id) { return localTemplates[id]; })
+    .filter(function(t) { return t && t.name && (t.dishes || []).length > 0; })
+    .sort(function(a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })
+    .slice(0, 5);
 
   const list = document.getElementById('meals-list');
   list.innerHTML = '';
@@ -1933,8 +2048,9 @@ function render() {
       + '<div class="note-row" style="margin-bottom:10px;">'
       + '<input type="text" id="' + m.id + '-note" placeholder="備註..." value="' + escAttr(meal.note) + '">'
       + '</div>'
-      + '<div class="save-row">'
+      + '<div class="save-row-wrap">'
       + '<button class="btn-save" onclick="saveMeal(\'' + m.id + '\')">儲存這餐</button>'
+      + '<button class="btn-save-template" onclick="saveAsTemplate(\'' + m.id + '\')" title="存為範本">💾 存範本</button>'
       + '</div></div>';
     list.appendChild(card);
   });
@@ -2278,6 +2394,20 @@ function mergeRemoteProfiles(remoteProfiles) {
   try { localStorage.setItem('profiles', JSON.stringify(localProfiles)); } catch(_) {}
 }
 
+function mergeRemoteTemplates(remoteTemplates) {
+  if (!remoteTemplates || typeof remoteTemplates !== 'object') return;
+  Object.keys(remoteTemplates).forEach(function(id) {
+    var r = remoteTemplates[id];
+    if (!r || typeof r !== 'object') return;
+    var l = localTemplates[id];
+    if (!l) { localTemplates[id] = r; return; }
+    var rTime = r.createdAt || '';
+    var lTime = l.createdAt || '';
+    if (rTime > lTime) localTemplates[id] = r;
+  });
+  try { localStorage.setItem('templates', JSON.stringify(localTemplates)); } catch(_) {}
+}
+
 function mergeRemoteIntoLocal(remote) {
   if (!remote || typeof remote !== 'object') return localData;
   const result = {};
@@ -2347,7 +2477,8 @@ async function loadFromDrive() {
     }
     if (driveData && typeof driveData === 'object' && !Array.isArray(driveData)) {
       // Profiles are synced separately so they don't pollute the date-keyed map.
-      if (driveData.profiles) mergeRemoteProfiles(driveData.profiles);
+      if (driveData.profiles)  mergeRemoteProfiles(driveData.profiles);
+      if (driveData.templates) mergeRemoteTemplates(driveData.templates);
       localData = mergeRemoteIntoLocal(driveData);
       try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
       render();
@@ -2399,7 +2530,8 @@ async function syncToDrive() {
         const remote = await fetchSharedFile();
         if (remote === null) return; // signOut was called
         if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
-          if (remote.profiles) mergeRemoteProfiles(remote.profiles);
+          if (remote.profiles)  mergeRemoteProfiles(remote.profiles);
+          if (remote.templates) mergeRemoteTemplates(remote.templates);
           localData = mergeRemoteIntoLocal(remote);
           try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
         }
@@ -2407,8 +2539,10 @@ async function syncToDrive() {
 
       // 2) Build photo-stripped payload from the merged localData.
       const payload = stripPhotosForUpload(localData);
-      // Attach cross-device profile map as a sibling top-level field.
-      payload.profiles = localProfiles;
+      // Attach cross-device profile map + meal templates as sibling
+      // top-level fields (non-date keys are skipped in merge/strip paths).
+      payload.profiles  = localProfiles;
+      payload.templates = localTemplates;
 
       // 3) PATCH the shared file by ID (overwrite with merged content).
       const res = await fetch(
@@ -2489,7 +2623,78 @@ window.addEventListener('load', function() {
   // touchstart handler registered. This empty passive listener is the
   // well-known workaround that enables press-feedback on all buttons.
   document.body.addEventListener('touchstart', function() {}, { passive: true });
+  initKeyboardFloat();
 });
+
+// ─── M6: floating save button above the mobile keyboard ─────────
+// When an input inside any meal body is focused, show a full-width
+// "儲存 XX" button glued just above the keyboard (via visualViewport).
+// This prevents the classic PWA pain where the keyboard hides the real
+// save button and users tap the wrong thing.
+function initKeyboardFloat() {
+  if (typeof window === 'undefined' || !window.visualViewport) return;
+  var float = document.createElement('button');
+  float.className = 'floating-save';
+  float.type = 'button';
+  document.body.appendChild(float);
+
+  var activeMealId = null;
+  var hideTimer = null;
+
+  function positionFloat() {
+    if (!activeMealId) return;
+    var vv = window.visualViewport;
+    // Distance from bottom of layout viewport to bottom of visual viewport.
+    // When keyboard is up this is the keyboard height.
+    var gap = window.innerHeight - (vv.height + vv.offsetTop);
+    float.style.bottom = Math.max(8, gap + 8) + 'px';
+  }
+
+  function showFor(mealId) {
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    activeMealId = mealId;
+    float.textContent = '✓ 儲存' + mealNameById(mealId);
+    float.onclick = function(e) {
+      e.preventDefault();
+      // Blur the input first so the keyboard closes before save triggers
+      // a re-render (otherwise the DOM for the button changes mid-click).
+      if (document.activeElement && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+      saveMeal(mealId);
+    };
+    float.style.display = 'block';
+    positionFloat();
+  }
+
+  function hide() {
+    activeMealId = null;
+    float.style.display = 'none';
+  }
+
+  document.addEventListener('focusin', function(e) {
+    var target = e.target;
+    if (!target || !target.closest) return;
+    var body = target.closest('.meal-body');
+    if (!body) return;
+    var card = target.closest('.meal-card');
+    if (!card || !card.id) return;
+    var mealId = card.id.replace('-card', '');
+    showFor(mealId);
+  });
+
+  document.addEventListener('focusout', function() {
+    // Delay so rapid focus-switches between inputs don't flicker the button.
+    if (hideTimer) clearTimeout(hideTimer);
+    hideTimer = setTimeout(function() {
+      var active = document.activeElement;
+      if (!active || !active.closest || !active.closest('.meal-body')) hide();
+    }, 120);
+  });
+
+  window.visualViewport.addEventListener('resize', positionFloat);
+  window.visualViewport.addEventListener('scroll', positionFloat);
+}
 
 // ─── STATS VIEW ──────────────────────────────────────────────────
 var statsWeekOffset = 0;
