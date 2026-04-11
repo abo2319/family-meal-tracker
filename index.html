@@ -361,9 +361,10 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 }
 .stats-chart-wrap svg { display: block; width: 100%; }
 .stats-avg-row {
-  display: grid; grid-template-columns: repeat(3,1fr);
+  display: grid; grid-template-columns: repeat(2,1fr);
   gap: 10px; padding: 0 16px 14px;
 }
+.s-val.kcal-c { color: #8B5CF6; }
 </style>
 </head>
 <body>
@@ -1735,13 +1736,16 @@ function renderStatsView() {
   // Chart
   document.getElementById('stats-chart').innerHTML = renderWeeklySvgChart(weekData);
 
-  // Averages
+  // Averages — only counts days with actual intake, so a half-logged week
+  // still shows a representative "per-day" figure instead of /7.
   var days = weekData.days;
   var count = days.filter(function(d) { return d.carb + d.pro + d.fat > 0; }).length || 1;
   var avgCarb = Math.round(days.reduce(function(s,d){return s+d.carb;},0) / count);
   var avgPro  = Math.round(days.reduce(function(s,d){return s+d.pro;},0)  / count);
   var avgFat  = Math.round(days.reduce(function(s,d){return s+d.fat;},0)  / count);
+  var avgKcal = Math.round(days.reduce(function(s,d){return s+d.kcal;},0) / count);
   document.getElementById('stats-avg-row').innerHTML =
+    '<div class="sum-card"><div class="s-label">平均熱量</div><div class="s-val kcal-c">' + avgKcal + '</div><div class="s-unit">大卡/天</div></div>' +
     '<div class="sum-card"><div class="s-label">平均碳水</div><div class="s-val carb-c">' + avgCarb + '</div><div class="s-unit">克/天</div></div>' +
     '<div class="sum-card"><div class="s-label">平均蛋白</div><div class="s-val pro-c">'  + avgPro  + '</div><div class="s-unit">克/天</div></div>' +
     '<div class="sum-card"><div class="s-label">平均脂肪</div><div class="s-val fat-c">'  + avgFat  + '</div><div class="s-unit">克/天</div></div>';
@@ -1805,9 +1809,12 @@ function buildWeekData(member, weekOffset) {
         fat  += parseFloat(meal.fat)  || 0;
       }
     });
+    // Atwater factors: 4 kcal/g carb, 4 kcal/g protein, 9 kcal/g fat.
+    var kcal = carb * 4 + pro * 4 + fat * 9;
     days.push({
       label: (d.getMonth()+1) + '/' + d.getDate() + ' (' + weekDayNames[i] + ')',
-      carb: Math.round(carb), pro: Math.round(pro), fat: Math.round(fat)
+      carb: Math.round(carb), pro: Math.round(pro), fat: Math.round(fat),
+      kcal: Math.round(kcal)
     });
   }
 
@@ -1824,7 +1831,7 @@ function renderWeeklySvgChart(weekData) {
   var BAR_W = 220; // max bar width in SVG units
   var ROW_H = 36;
   var LABEL_W = 72;
-  var TOTAL_W = 44;
+  var TOTAL_W = 64; // room for "1234 kcal"
   var SVG_W = LABEL_W + BAR_W + TOTAL_W;
   var SVG_H = days.length * ROW_H + 4;
 
@@ -1846,7 +1853,8 @@ function renderWeeklySvgChart(weekData) {
     var xFat  = xPro + wPro;
     var barH = 18;
     var barY = y + (ROW_H - barH) / 2;
-    var totalStr = total > 0 ? total + 'g' : '–';
+    // Show kcal (meaningful energy intake) instead of gram sum (meaningless).
+    var totalStr = d.kcal > 0 ? d.kcal + ' 大卡' : '–';
     return [
       '<text x="' + (LABEL_W - 6) + '" y="' + (barY + 13) + '" text-anchor="end" font-size="11" fill="#9A9890">' + d.label + '</text>',
       total > 0 ? [
@@ -1854,7 +1862,7 @@ function renderWeeklySvgChart(weekData) {
         '<rect x="' + xPro  + '" y="' + barY + '" width="' + wPro  + '" height="' + barH + '" rx="0" fill="#1D9E75"/>',
         '<rect x="' + xFat  + '" y="' + barY + '" width="' + wFat  + '" height="' + barH + '" rx="0" fill="#BA7517"/>',
       ].join('') : '<rect x="' + LABEL_W + '" y="' + (barY+7) + '" width="' + BAR_W + '" height="4" rx="2" fill="#E0DED6"/>',
-      '<text x="' + (LABEL_W + BAR_W + 4) + '" y="' + (barY + 13) + '" font-size="11" fill="#5F5E5A">' + totalStr + '</text>'
+      '<text x="' + (LABEL_W + BAR_W + 4) + '" y="' + (barY + 13) + '" font-size="10" fill="#5F5E5A">' + totalStr + '</text>'
     ].join('');
   });
 
