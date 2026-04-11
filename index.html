@@ -454,6 +454,7 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
   <div class="um-item" onclick="showStats();closeMenu()">📊 統計</div>
   <div class="um-item" onclick="syncToDrive()">☁️ 立即同步</div>
   <div class="um-item" onclick="exportJSON()">📥 匯出資料</div>
+  <div class="um-item" onclick="promptForGeminiKey()">🔑 設定 Gemini API Key</div>
   <div class="um-item danger" onclick="signOut()">登出</div>
 </div>
 
@@ -463,9 +464,39 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────
 const CLIENT_ID = CONFIG.CLIENT_ID;
-const GEMINI_API_KEY = CONFIG.GEMINI_API_KEY || '';
 const GEMINI_MODEL = 'gemini-2.5-flash';
-const SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
+// Gemini API key lives in localStorage per-device (not in repo). CONFIG.GEMINI_API_KEY
+// is only used as a dev fallback — the skip-worktree'd local config.js may contain it.
+function getGeminiKey() {
+  const saved = localStorage.getItem('geminiApiKey');
+  if (saved && saved.trim()) return saved.trim();
+  const fromConfig = CONFIG.GEMINI_API_KEY;
+  if (fromConfig && fromConfig !== 'YOUR_GEMINI_API_KEY_HERE') return fromConfig;
+  return '';
+}
+function promptForGeminiKey() {
+  closeMenu();
+  const current = localStorage.getItem('geminiApiKey') || '';
+  const input = prompt(
+    '請貼上 Gemini API Key\n\n取得方式：https://aistudio.google.com/apikey\n（免費，用 Google 帳號即可）\n\n留空可清除目前的 key。',
+    current
+  );
+  if (input === null) return false;
+  const trimmed = input.trim();
+  if (!trimmed) {
+    localStorage.removeItem('geminiApiKey');
+    toast('Gemini API Key 已清除');
+    return false;
+  }
+  if (!/^AIza[A-Za-z0-9_-]{20,}$/.test(trimmed)) {
+    toast('Key 格式不對，應為 AIza 開頭');
+    return false;
+  }
+  localStorage.setItem('geminiApiKey', trimmed);
+  toast('Gemini API Key 已儲存 ✓');
+  return true;
+}
+const SCOPES = 'openid profile email https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const FOLDER_NAME = 'FamilyMealTracker';
 
 // ─── STATE ───────────────────────────────────────────────────────
@@ -727,27 +758,68 @@ function rerenderDishes(mealId) {
 }
 
 // ─── PHOTO ───────────────────────────────────────────────────────
+// Compress image via canvas: longest edge ≤ maxSize, JPEG quality 0.85.
+// Typical iPhone photo: 3-5 MB → 200-400 KB. Prevents localStorage quota exhaustion.
+function compressImage(dataUrl, maxSize, quality) {
+  return new Promise(function(resolve, reject) {
+    const img = new Image();
+    img.onload = function() {
+      const ratio = Math.min(maxSize / img.width, maxSize / img.height, 1);
+      const w = Math.round(img.width * ratio);
+      const h = Math.round(img.height * ratio);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = function() { reject(new Error('image decode failed')); };
+    img.src = dataUrl;
+  });
+}
+
 function handlePhoto(mealId, dishIdx, input) {
   const file = input.files[0]; if (!file) return;
   const reader = new FileReader();
   reader.onload = async function(e) {
     const did = mealId + '-dish-' + dishIdx;
     const zone = document.getElementById(did + '-photo');
+
+    // Compress before anything else. Fall back to original on failure.
+    let photoDataUrl;
+    try {
+      photoDataUrl = await compressImage(e.target.result, 1280, 0.85);
+    } catch (err) {
+      console.warn('Compression failed, using original:', err);
+      photoDataUrl = e.target.result;
+    }
+
+    // Update DOM first (photo visible) and enable AI button BEFORE localStorage,
+    // so even a QuotaExceededError can't leave the button stuck disabled.
     zone.classList.add('filled');
     let img = zone.querySelector('img');
     if (!img) { img = document.createElement('img'); zone.prepend(img); }
-    img.src = e.target.result;
-    const meal = getMeal(mealId);
-    if (!meal.dishes[dishIdx]) meal.dishes[dishIdx] = { photo: '', items: [] };
-    meal.dishes[dishIdx].photo = e.target.result;
-    const k = dateKey();
-    localData[k][mealId] = meal;
-    localStorage.setItem('mealData', JSON.stringify(localData));
-    updateBadge(mealId);
+    img.src = photoDataUrl;
     const aiBtn = document.getElementById(did + '-ai-btn');
     if (aiBtn) aiBtn.disabled = false;
+
+    // Persist to in-memory model + localStorage with quota guard.
+    const meal = getMeal(mealId);
+    if (!meal.dishes[dishIdx]) meal.dishes[dishIdx] = { photo: '', items: [] };
+    meal.dishes[dishIdx].photo = photoDataUrl;
+    const k = dateKey();
+    localData[k][mealId] = meal;
+    try {
+      localStorage.setItem('mealData', JSON.stringify(localData));
+      toast('照片已儲存！');
+    } catch (err) {
+      console.error('localStorage quota exceeded:', err);
+      toast('本機空間不足，本次照片僅在記憶體中');
+    }
+    updateBadge(mealId);
     setSyncPending();
-    toast('照片已儲存！');
+
     if (accessToken) {
       setTimeout(async function() {
         try {
@@ -756,7 +828,7 @@ function handlePhoto(mealId, dishIdx, input) {
           const dateStr = currentDate.toISOString().slice(0,10);
           const photoFid = await ensurePhotoFolder(fid, dateStr);
           const fname = currentMember + '_' + mealId + '_' + dishIdx + '.jpg';
-          await uploadPhoto(photoFid, fname, e.target.result);
+          await uploadPhoto(photoFid, fname, photoDataUrl);
           toast('照片已存至 Drive ✓');
         } catch(err) {
           console.error('Photo upload error:', err);
@@ -786,9 +858,13 @@ function removePhoto(mealId, dishIdx, e) {
 
 // ─── GEMINI FOOD RECOGNITION ─────────────────────────────────────
 async function recognizeFood(mealId, dishIdx) {
-  if (!GEMINI_API_KEY || GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
-    toast('請先在 config.js 設定 GEMINI_API_KEY');
-    return;
+  let apiKey = getGeminiKey();
+  if (!apiKey) {
+    // First-run: prompt user to paste their key. Retry on success.
+    const ok = promptForGeminiKey();
+    if (!ok) return;
+    apiKey = getGeminiKey();
+    if (!apiKey) return;
   }
   const meal = getMeal(mealId);
   const dish = meal.dishes[dishIdx];
@@ -842,7 +918,7 @@ async function recognizeFood(mealId, dishIdx) {
     };
 
     const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
-      + GEMINI_MODEL + ':generateContent?key=' + encodeURIComponent(GEMINI_API_KEY);
+      + GEMINI_MODEL + ':generateContent?key=' + encodeURIComponent(apiKey);
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
