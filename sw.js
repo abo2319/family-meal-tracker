@@ -1,5 +1,5 @@
 // Bump this on every deploy so installed PWAs pick up fresh HTML/JS.
-const VERSION = 'v16-2026-04-11-templates-kbd';
+const VERSION = 'v17-2026-04-11-pdf';
 const CACHE = 'meal-tracker-' + VERSION;
 
 const ASSETS = [
@@ -31,10 +31,14 @@ self.addEventListener('fetch', function(e) {
   const req = e.request;
   const url = req.url;
 
-  // Pass-through: third-party APIs we never want to cache
+  // Pass-through: third-party APIs / on-demand libraries we never want to
+  // intercept (Google OAuth, Gemini, Google Fonts, jsdelivr CDN for pdf libs).
   if (url.indexOf('googleapis.com') !== -1
       || url.indexOf('accounts.google.com') !== -1
-      || url.indexOf('gstatic.com') !== -1) {
+      || url.indexOf('gstatic.com') !== -1
+      || url.indexOf('cdn.jsdelivr.net') !== -1
+      || url.indexOf('fonts.googleapis.com') !== -1
+      || url.indexOf('fonts.gstatic.com') !== -1) {
     return;
   }
 
