@@ -168,23 +168,43 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 .meal-chevron { font-size: 12px; color: var(--gray-400); margin-left: 6px; transition: transform 0.2s; }
 .meal-card.open .meal-chevron { transform: rotate(180deg); }
 
-.meal-body { display: none; border-top: 1px solid var(--gray-100); }
+.meal-body { display: none; border-top: 1px solid var(--gray-100); padding-top: 12px; }
 .meal-card.open .meal-body { display: block; }
+
+/* ── Dish Cards ── */
+.dish-card {
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-sm);
+  margin: 0 16px 10px;
+  overflow: hidden;
+}
+.dish-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px 0;
+}
+.dish-label { font-size: 13px; font-weight: 700; color: var(--gray-600); }
+.dish-del-btn {
+  font-size: 12px; padding: 4px 12px; border-radius: 99px;
+  background: none; border: 1px solid var(--gray-200);
+  color: var(--coral); cursor: pointer; font-family: inherit;
+}
+.dish-del-btn:active { background: var(--coral); color: #fff; border-color: var(--coral); }
 
 /* Photo */
 .photo-zone {
-  margin: 14px 16px 0;
-  height: 180px; border-radius: var(--radius-sm);
+  margin: 10px 14px 0;
+  height: 160px; border-radius: var(--radius-sm);
   border: 2px dashed var(--gray-200);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   cursor: pointer; overflow: hidden; position: relative;
-  background: var(--gray-50);
+  background: #fff;
   transition: border-color 0.2s;
 }
 .photo-zone:active { border-color: var(--green); }
 .photo-zone img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .photo-ph { display: flex; flex-direction: column; align-items: center; gap: 6px; color: var(--gray-400); font-size: 13px; position: relative; z-index: 1; }
-.photo-ph .cam { font-size: 28px; }
+.photo-ph .cam { font-size: 32px; }
 .photo-zone.filled .photo-ph { display: none; }
 .photo-del {
   position: absolute; top: 8px; right: 8px; z-index: 2;
@@ -207,6 +227,32 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 .fi-header { display:grid; grid-template-columns:1fr 56px 56px 56px 32px; gap:6px; padding:0 0 4px; }
 .fi-header span { font-size:10px; color:var(--gray-400); text-align:center; }
 .fi-header span:first-child { text-align:left; }
+
+/* AI recognize button */
+.btn-ai {
+  width:100%; padding:11px;
+  border:1.5px solid var(--green); border-radius:var(--radius-sm);
+  background:var(--green-light); color:var(--green-dark);
+  font-size:14px; font-weight:600; font-family:inherit; cursor:pointer;
+  transition:background 0.15s, transform 0.1s, opacity 0.15s;
+}
+.btn-ai:disabled {
+  opacity:0.45; cursor:not-allowed;
+  background:var(--gray-100); border-color:var(--gray-200); color:var(--gray-400);
+}
+.btn-ai:not(:disabled):active { background:var(--green); color:#fff; transform:scale(0.98); }
+.btn-ai.loading { background:var(--gray-100); color:var(--gray-400); cursor:wait; }
+
+/* Add dish button */
+.add-dish-btn {
+  display: block; width: calc(100% - 32px); margin: 2px 16px 10px;
+  padding: 13px; border: 2px dashed var(--green);
+  border-radius: var(--radius-sm); background: var(--green-light);
+  color: var(--green-dark); font-size: 15px; font-weight: 600;
+  cursor: pointer; font-family: inherit;
+  transition: background 0.15s;
+}
+.add-dish-btn:active { background: var(--green); color: #fff; }
 
 .note-row { padding: 0 16px; }
 .note-row input {
@@ -350,6 +396,8 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 <script>
 // ─── CONFIG ──────────────────────────────────────────────────────
 const CLIENT_ID = CONFIG.CLIENT_ID;
+const GEMINI_API_KEY = CONFIG.GEMINI_API_KEY || '';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const SCOPES = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const FOLDER_NAME = 'FamilyMealTracker';
 
@@ -368,6 +416,15 @@ const MEALS_DEF = [
   { id:'dinner',    name:'晚餐', time:'18:00 – 20:00', icon:'🍲', bg:'#F0F4FF' },
 ];
 
+// ─── DEV MODE (localhost bypass) ─────────────────────────────────
+const IS_DEV = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+function devSignIn() {
+  console.log('[DEV] Bypassing Google login on localhost');
+  userInfo = { name: 'Dev User', picture: null };
+  showApp();
+}
+
 // ─── GOOGLE IDENTITY ─────────────────────────────────────────────
 function initGoogle() {
   tokenClient = google.accounts.oauth2.initTokenClient({
@@ -380,7 +437,6 @@ function initGoogle() {
         return;
       }
       accessToken = resp.access_token;
-      // Store token with expiry time (tokens last ~1hr)
       const expiry = Date.now() + (resp.expires_in || 3600) * 1000;
       localStorage.setItem('accessToken', accessToken);
       localStorage.setItem('tokenExpiry', expiry.toString());
@@ -396,7 +452,7 @@ function initGoogle() {
 }
 
 async function signIn() {
-  // Check if we have a valid saved token
+  if (IS_DEV) { devSignIn(); return; }
   const saved = localStorage.getItem('accessToken');
   const expiry = parseInt(localStorage.getItem('tokenExpiry') || '0');
   if (saved && Date.now() < expiry - 60000) {
@@ -406,12 +462,10 @@ async function signIn() {
       showApp();
       return;
     } catch(e) {
-      // Token invalid, clear and re-login
       localStorage.removeItem('accessToken');
       localStorage.removeItem('tokenExpiry');
     }
   }
-  // Always use 'select_account' to avoid silent loop
   tokenClient.requestAccessToken({ prompt: 'select_account' });
 }
 
@@ -447,10 +501,10 @@ function showApp() {
 function renderAvatar() {
   const wrap = document.getElementById('avatar-wrap');
   if (userInfo && userInfo.picture) {
-    wrap.innerHTML = `<img class="user-avatar" src="${userInfo.picture}" referrerpolicy="no-referrer">`;
+    wrap.innerHTML = '<img class="user-avatar" src="' + userInfo.picture + '" referrerpolicy="no-referrer">';
   } else {
     const name = userInfo ? userInfo.name || '?' : '?';
-    wrap.innerHTML = `<div class="user-avatar-placeholder">${name[0]}</div>`;
+    wrap.innerHTML = '<div class="user-avatar-placeholder">' + name[0] + '</div>';
   }
 }
 
@@ -458,11 +512,11 @@ function renderAvatar() {
 function renderMembers() {
   const strip = document.getElementById('member-strip');
   strip.innerHTML = '';
-  members.forEach((m, i) => {
+  members.forEach(function(m) {
     const chip = document.createElement('span');
     chip.className = 'm-chip' + (m === currentMember ? ' active' : '');
     chip.textContent = m;
-    chip.onclick = () => { currentMember = m; renderMembers(); render(); };
+    chip.onclick = function() { currentMember = m; renderMembers(); render(); };
     strip.appendChild(chip);
   });
   const add = document.createElement('span');
@@ -498,58 +552,71 @@ function formatDate() {
   const opts = { month:'long', day:'numeric' };
   const wd = currentDate.toLocaleDateString('zh-TW', { weekday:'long' });
   const md = currentDate.toLocaleDateString('zh-TW', opts);
-  let prefix = diff === 0 ? '今天' : diff === -1 ? '昨天' : diff === 1 ? '明天' : '';
+  const prefix = diff === 0 ? '今天' : diff === -1 ? '昨天' : diff === 1 ? '明天' : '';
   document.getElementById('date-main').textContent = prefix ? prefix + '・' + md : md;
-  document.getElementById('date-sub').textContent = wd + (prefix ? '' : '');
+  document.getElementById('date-sub').textContent = wd;
 }
 
 // ─── MEAL DATA ───────────────────────────────────────────────────
 function getMeal(mealId) {
   const k = dateKey();
   if (!localData[k]) localData[k] = {};
-  if (!localData[k][mealId]) localData[k][mealId] = { carb:'', pro:'', fat:'', note:'', photo:'' };
+  const m = localData[k][mealId];
+  if (!m) {
+    // New entry: one empty dish by default
+    localData[k][mealId] = { note: '', dishes: [{ photo: '', items: [] }] };
+  } else if (!m.dishes) {
+    // Migrate old format {photo, items, note} → {note, dishes:[{photo, items}]}
+    localData[k][mealId] = {
+      note: m.note || '',
+      dishes: [{ photo: m.photo || '', items: m.items || [] }]
+    };
+  }
   return localData[k][mealId];
 }
 
 function saveMeal(mealId) {
   const k = dateKey();
   if (!localData[k]) localData[k] = {};
-  const m = localData[k][mealId] || {};
-  // Sum up all food items
-  let totalCarb = 0, totalPro = 0, totalFat = 0;
-  const items = getFoodItems(mealId);
-  items.forEach(item => {
-    totalCarb += parseFloat(item.carb) || 0;
-    totalPro  += parseFloat(item.pro)  || 0;
-    totalFat  += parseFloat(item.fat)  || 0;
+  const m = getMeal(mealId);
+  // Collect all dish cards from DOM
+  const dishCards = document.querySelectorAll('#' + mealId + '-dishes .dish-card');
+  const dishes = [];
+  let totalCarb=0, totalPro=0, totalFat=0;
+  dishCards.forEach(function(card, idx) {
+    const imgEl = card.querySelector('.photo-zone img');
+    const photo = imgEl ? imgEl.src : (m.dishes[idx] ? m.dishes[idx].photo || '' : '');
+    const items = getDishItems(card);
+    items.forEach(function(item) {
+      totalCarb += parseFloat(item.carb) || 0;
+      totalPro  += parseFloat(item.pro)  || 0;
+      totalFat  += parseFloat(item.fat)  || 0;
+    });
+    dishes.push({ photo: photo, items: items });
   });
+  m.note = document.getElementById(mealId + '-note').value;
+  m.dishes = dishes;
   m.carb = totalCarb;
   m.pro  = totalPro;
   m.fat  = totalFat;
-  m.note = document.getElementById(mealId+'-note').value;
-  m.items = items;
   localData[k][mealId] = m;
   localStorage.setItem('mealData', JSON.stringify(localData));
   updateSummary();
   updateBadge(mealId);
-  // Haptic feedback
   if (navigator.vibrate) navigator.vibrate(40);
-  // Button animation
-  const btn = document.querySelector(`#${mealId}-card .btn-save`);
+  const btn = document.querySelector('#' + mealId + '-card .btn-save');
   if (btn) {
     btn.textContent = '✓ 已儲存！';
     btn.style.background = '#0F6E56';
-    setTimeout(() => { btn.textContent = '儲存這餐'; btn.style.background = ''; }, 1800);
+    setTimeout(function() { btn.textContent = '儲存這餐'; btn.style.background = ''; }, 1800);
   }
   setSyncPending();
 }
 
-function getFoodItems(mealId) {
-  const container = document.getElementById(mealId+'-items');
-  if (!container) return [];
-  const rows = container.querySelectorAll('.food-item-row');
+function getDishItems(card) {
+  const rows = card.querySelectorAll('.food-item-row');
   const items = [];
-  rows.forEach(row => {
+  rows.forEach(function(row) {
     items.push({
       name: row.querySelector('.fi-name').value,
       carb: row.querySelector('.fi-carb').value,
@@ -560,38 +627,73 @@ function getFoodItems(mealId) {
   return items;
 }
 
+// ─── DISH MANAGEMENT ─────────────────────────────────────────────
+function addDish(mealId) {
+  const meal = getMeal(mealId);
+  meal.dishes.push({ photo: '', items: [] });
+  const k = dateKey();
+  localData[k][mealId] = meal;
+  localStorage.setItem('mealData', JSON.stringify(localData));
+  rerenderDishes(mealId);
+  // Auto-open camera for the new dish so elderly users don't need an extra tap
+  const newIdx = meal.dishes.length - 1;
+  const fileInput = document.getElementById(mealId + '-dish-' + newIdx + '-file');
+  if (fileInput) fileInput.click();
+}
+
+function removeDish(mealId, dishIdx) {
+  const meal = getMeal(mealId);
+  if (meal.dishes.length <= 1) return;
+  meal.dishes.splice(dishIdx, 1);
+  const k = dateKey();
+  localData[k][mealId] = meal;
+  localStorage.setItem('mealData', JSON.stringify(localData));
+  rerenderDishes(mealId);
+  updateSaveBtnTotal(mealId);
+}
+
+function rerenderDishes(mealId) {
+  const meal = getMeal(mealId);
+  const container = document.getElementById(mealId + '-dishes');
+  if (!container) return;
+  container.innerHTML = renderDishes(mealId, meal.dishes);
+}
+
 // ─── PHOTO ───────────────────────────────────────────────────────
-function handlePhoto(mealId, input) {
+function handlePhoto(mealId, dishIdx, input) {
   const file = input.files[0]; if (!file) return;
   const reader = new FileReader();
-  reader.onload = async e => {
-    const zone = document.getElementById(mealId+'-photo');
+  reader.onload = async function(e) {
+    const did = mealId + '-dish-' + dishIdx;
+    const zone = document.getElementById(did + '-photo');
     zone.classList.add('filled');
     let img = zone.querySelector('img');
     if (!img) { img = document.createElement('img'); zone.prepend(img); }
     img.src = e.target.result;
+    const meal = getMeal(mealId);
+    if (!meal.dishes[dishIdx]) meal.dishes[dishIdx] = { photo: '', items: [] };
+    meal.dishes[dishIdx].photo = e.target.result;
     const k = dateKey();
-    if (!localData[k]) localData[k] = {};
-    if (!localData[k][mealId]) localData[k][mealId] = {};
-    localData[k][mealId].photo = e.target.result;
+    localData[k][mealId] = meal;
     localStorage.setItem('mealData', JSON.stringify(localData));
     updateBadge(mealId);
+    const aiBtn = document.getElementById(did + '-ai-btn');
+    if (aiBtn) aiBtn.disabled = false;
     setSyncPending();
     toast('照片已儲存！');
-    // Upload photo to Drive
     if (accessToken) {
-      setTimeout(async () => {
+      setTimeout(async function() {
         try {
           toast('上傳照片至 Drive...');
           const fid = await ensureFolder();
           const dateStr = currentDate.toISOString().slice(0,10);
           const photoFid = await ensurePhotoFolder(fid, dateStr);
-          const fname = `${currentMember}_${mealId}.jpg`;
+          const fname = currentMember + '_' + mealId + '_' + dishIdx + '.jpg';
           await uploadPhoto(photoFid, fname, e.target.result);
           toast('照片已存至 Drive ✓');
         } catch(err) {
           console.error('Photo upload error:', err);
-          toast('Drive 上傳失敗: ' + (err.message||err));
+          toast('Drive 上傳失敗: ' + (err.message || err));
         }
       }, 300);
     }
@@ -599,15 +701,135 @@ function handlePhoto(mealId, input) {
   reader.readAsDataURL(file);
 }
 
-function removePhoto(mealId, e) {
+function removePhoto(mealId, dishIdx, e) {
   e.stopPropagation();
-  const zone = document.getElementById(mealId+'-photo');
+  const did = mealId + '-dish-' + dishIdx;
+  const zone = document.getElementById(did + '-photo');
   zone.classList.remove('filled');
   const img = zone.querySelector('img'); if (img) img.remove();
+  const meal = getMeal(mealId);
+  if (meal.dishes[dishIdx]) meal.dishes[dishIdx].photo = '';
   const k = dateKey();
-  if (localData[k] && localData[k][mealId]) localData[k][mealId].photo = '';
+  localData[k][mealId] = meal;
   localStorage.setItem('mealData', JSON.stringify(localData));
+  const aiBtn = document.getElementById(did + '-ai-btn');
+  if (aiBtn) aiBtn.disabled = true;
   updateBadge(mealId); setSyncPending();
+}
+
+// ─── GEMINI FOOD RECOGNITION ─────────────────────────────────────
+async function recognizeFood(mealId, dishIdx) {
+  if (!GEMINI_API_KEY || GEMINI_API_KEY === 'YOUR_GEMINI_API_KEY_HERE') {
+    toast('請先在 config.js 設定 GEMINI_API_KEY');
+    return;
+  }
+  const meal = getMeal(mealId);
+  const dish = meal.dishes[dishIdx];
+  if (!dish || !dish.photo) { toast('請先拍照'); return; }
+
+  const did = mealId + '-dish-' + dishIdx;
+  const btn = document.getElementById(did + '-ai-btn');
+  if (!btn) return;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.textContent = '✨ AI 分析中...';
+
+  try {
+    const base64 = dish.photo.split(',')[1];
+    const mimeType = (dish.photo.split(';')[0].split(':')[1]) || 'image/jpeg';
+
+    const hintEl = document.getElementById(did + '-hint');
+    const hint = hintEl ? hintEl.value.trim() : '';
+    const hintLine = hint ? '\n【使用者提示】圖中包含：' + hint + '。請優先以此為準估算數量，再參考照片確認。' : '';
+
+    const body = {
+      contents: [{
+        parts: [
+          { text: '請分析這張圖片，分兩種情況處理：\n1. 如果是「營養成分表／標示」：直接讀取碳水化合物、蛋白質、脂肪的數值（克），以產品名稱作為食物名稱，只回傳一筆項目，礦物質維生素等一律忽略。\n2. 如果是「食物照片」：請先仔細觀察圖中**每種食物的實際可見數量**（數出件數、估計體積），再計算三大營養素。\n【重要】不要套用「標準份量」，要根據照片裡看到的實際量。例如：只看到 8 顆杏仁就以 8 顆計算（≈4g 脂肪），只看到 3 片酪梨就以 3 片計算（≈4g 脂肪）。寧可保守低估，不要高估。回傳整數克數。' + hintLine + '\n請根據圖片內容自動判斷是哪種情況並回傳。' },
+          { inline_data: { mime_type: mimeType, data: base64 } }
+        ]
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            items: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  name: { type: 'STRING' },
+                  carb: { type: 'NUMBER' },
+                  pro:  { type: 'NUMBER' },
+                  fat:  { type: 'NUMBER' }
+                },
+                required: ['name','carb','pro','fat']
+              }
+            }
+          },
+          required: ['items']
+        }
+      }
+    };
+
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/'
+      + GEMINI_MODEL + ':generateContent?key=' + encodeURIComponent(GEMINI_API_KEY);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error('Gemini API ' + res.status + ': ' + errText.slice(0, 200));
+    }
+
+    const data = await res.json();
+    const textContent = data && data.candidates && data.candidates[0]
+      && data.candidates[0].content && data.candidates[0].content.parts
+      && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text;
+    if (!textContent) throw new Error('Gemini 回傳空內容');
+
+    const parsed = JSON.parse(textContent);
+    if (!parsed.items || !Array.isArray(parsed.items) || parsed.items.length === 0) {
+      throw new Error('沒有識別到任何食物');
+    }
+
+    fillDishItems(mealId, dishIdx, parsed.items);
+    toast('AI 已識別 ' + parsed.items.length + ' 項食物 ✓');
+    if (navigator.vibrate) navigator.vibrate(40);
+  } catch (err) {
+    console.error('Gemini error:', err);
+    toast('AI 識別失敗：' + (err.message || err));
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    btn.textContent = originalText;
+  }
+}
+
+function fillDishItems(mealId, dishIdx, items) {
+  const did = mealId + '-dish-' + dishIdx;
+  const container = document.getElementById(did + '-items');
+  if (!container) return;
+  const escAttr = function(s) {
+    return String(s || '').replace(/[<>"&]/g, function(c) {
+      return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+    });
+  };
+  const sanitized = items.map(function(it) {
+    return {
+      name: escAttr(it.name),
+      carb: Math.max(0, Math.round(Number(it.carb) || 0)),
+      pro:  Math.max(0, Math.round(Number(it.pro)  || 0)),
+      fat:  Math.max(0, Math.round(Number(it.fat)  || 0))
+    };
+  });
+  container.innerHTML = renderFoodItems(mealId, dishIdx, sanitized);
+  updateSaveBtnTotal(mealId);
 }
 
 // ─── RENDER ──────────────────────────────────────────────────────
@@ -615,104 +837,149 @@ function render() {
   formatDate();
   const list = document.getElementById('meals-list');
   list.innerHTML = '';
-  MEALS_DEF.forEach(m => {
+  MEALS_DEF.forEach(function(m) {
     const meal = getMeal(m.id);
-    const hasData = meal.carb || meal.pro || meal.fat || meal.note || meal.photo;
+    const hasData = meal.carb || meal.pro || meal.fat || meal.note
+      || meal.dishes.some(function(d) { return d.photo || (d.items && d.items.length > 0 && d.items[0].name); });
     const card = document.createElement('div');
     card.className = 'meal-card' + (hasData ? ' has-data' : '');
     card.id = m.id + '-card';
-    card.innerHTML = `
-      <div class="meal-head" onclick="toggleCard('${m.id}')">
-        <div class="meal-head-left">
-          <div class="meal-icon-wrap" style="background:${m.bg}">${m.icon}</div>
-          <div>
-            <div class="meal-name">${m.name}</div>
-            <div class="meal-time">${m.time}</div>
-          </div>
-        </div>
-        <div style="display:flex;align-items:center;gap:4px">
-          <span class="meal-badge ${hasData?'done':''}" id="${m.id}-badge">${hasData?'已記錄':'未記錄'}</span>
-          <span class="meal-chevron">▾</span>
-        </div>
-      </div>
-      <div class="meal-body">
-        <div class="photo-zone ${meal.photo?'filled':''}" id="${m.id}-photo" onclick="document.getElementById('${m.id}-file').click()">
-          ${meal.photo ? `<img src="${meal.photo}">` : ''}
-          <div class="photo-ph"><span class="cam">📷</span><span>點擊拍照或上傳</span></div>
-          <button class="photo-del" onclick="removePhoto('${m.id}',event)">移除</button>
-        </div>
-        <input type="file" accept="image/*" style="display:none" id="${m.id}-file" onchange="handlePhoto('${m.id}',this)">
-        <div id="${m.id}-items" style="padding:12px 16px 0;display:flex;flex-direction:column;gap:8px;">
-          ${renderFoodItems(m.id, meal.items)}
-        </div>
-        <div style="padding:8px 16px 0;">
-          <button onclick="addFoodItem('${m.id}')" style="width:100%;padding:9px;border:1.5px dashed var(--gray-200);border-radius:var(--radius-sm);background:none;color:var(--gray-400);font-size:14px;cursor:pointer;font-family:inherit;">＋ 新增食物</button>
-        </div>
-        <div class="note-row" style="margin:10px 16px 0;padding:0;">
-          <input type="text" id="${m.id}-note" placeholder="備註..." value="${meal.note||''}">
-        </div>
-        <div class="save-row">
-          <button class="btn-save" onclick="saveMeal('${m.id}')">儲存這餐</button>
-        </div>
-      </div>`;
+    card.innerHTML = '<div class="meal-head" onclick="toggleCard(\'' + m.id + '\')">'
+      + '<div class="meal-head-left">'
+      + '<div class="meal-icon-wrap" style="background:' + m.bg + '">' + m.icon + '</div>'
+      + '<div><div class="meal-name">' + m.name + '</div>'
+      + '<div class="meal-time">' + m.time + '</div></div>'
+      + '</div>'
+      + '<div style="display:flex;align-items:center;gap:4px">'
+      + '<span class="meal-badge ' + (hasData ? 'done' : '') + '" id="' + m.id + '-badge">' + (hasData ? '已記錄' : '未記錄') + '</span>'
+      + '<span class="meal-chevron">▾</span>'
+      + '</div></div>'
+      + '<div class="meal-body">'
+      + '<div id="' + m.id + '-dishes">' + renderDishes(m.id, meal.dishes) + '</div>'
+      + '<button class="add-dish-btn" onclick="addDish(\'' + m.id + '\')">📷 新增一道菜</button>'
+      + '<div class="note-row" style="margin-bottom:10px;">'
+      + '<input type="text" id="' + m.id + '-note" placeholder="備註..." value="' + (meal.note || '') + '">'
+      + '</div>'
+      + '<div class="save-row">'
+      + '<button class="btn-save" onclick="saveMeal(\'' + m.id + '\')">儲存這餐</button>'
+      + '</div></div>';
     list.appendChild(card);
   });
   updateSummary();
 }
 
-function toggleCard(mealId) {
-  document.getElementById(mealId+'-card').classList.toggle('open');
+function renderDishes(mealId, dishes) {
+  if (!dishes || dishes.length === 0) dishes = [{ photo: '', items: [] }];
+  return dishes.map(function(dish, idx) {
+    return renderDishCard(mealId, idx, dish, dishes.length);
+  }).join('');
 }
 
-function renderFoodItems(mealId, items) {
+function renderDishCard(mealId, dishIdx, dish, totalDishes) {
+  const did = mealId + '-dish-' + dishIdx;
+  const canDelete = totalDishes > 1;
+  const delBtn = canDelete
+    ? '<button class="dish-del-btn" onclick="removeDish(\'' + mealId + '\',' + dishIdx + ')">移除這道</button>'
+    : '';
+  const imgTag = dish.photo ? '<img src="' + dish.photo + '">' : '';
+  const aiDisabled = dish.photo ? '' : 'disabled';
+  return '<div class="dish-card" id="' + did + '">'
+    + '<div class="dish-header">'
+    + '<span class="dish-label">第 ' + (dishIdx + 1) + ' 道菜</span>'
+    + delBtn
+    + '</div>'
+    + '<div class="photo-zone ' + (dish.photo ? 'filled' : '') + '" id="' + did + '-photo"'
+    + ' onclick="document.getElementById(\'' + did + '-file\').click()">'
+    + imgTag
+    + '<div class="photo-ph"><span class="cam">📷</span><span>點擊拍照或上傳</span></div>'
+    + '<button class="photo-del" onclick="removePhoto(\'' + mealId + '\',' + dishIdx + ',event)">移除</button>'
+    + '</div>'
+    + '<input type="file" accept="image/*" style="display:none" id="' + did + '-file"'
+    + ' onchange="handlePhoto(\'' + mealId + '\',' + dishIdx + ',this)">'
+    + '<div style="padding:10px 14px 4px;">'
+    + '<input type="text" id="' + did + '-hint" placeholder="食材提示（選填）例：10顆杏仁、半顆酪梨"'
+    + ' style="width:100%;box-sizing:border-box;padding:8px 10px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-600);font-family:inherit;">'
+    + '</div>'
+    + '<div style="padding:4px 14px 0;">'
+    + '<button class="btn-ai" id="' + did + '-ai-btn"'
+    + ' onclick="recognizeFood(\'' + mealId + '\',' + dishIdx + ')" ' + aiDisabled + '>✨ 用 AI 識別食物</button>'
+    + '</div>'
+    + '<div id="' + did + '-items" style="padding:10px 14px 0;display:flex;flex-direction:column;gap:8px;">'
+    + renderFoodItems(mealId, dishIdx, dish.items)
+    + '</div>'
+    + '<div style="padding:6px 14px 10px;">'
+    + '<button onclick="addFoodItemToDish(\'' + mealId + '\',' + dishIdx + ')"'
+    + ' style="width:100%;padding:9px;border:1.5px dashed var(--gray-200);border-radius:var(--radius-sm);background:none;color:var(--gray-400);font-size:14px;cursor:pointer;font-family:inherit;">＋ 手動新增食物</button>'
+    + '</div>'
+    + '</div>';
+}
+
+function toggleCard(mealId) {
+  document.getElementById(mealId + '-card').classList.toggle('open');
+}
+
+function renderFoodItems(mealId, dishIdx, items) {
   const list = (items && items.length > 0) ? items : [{ name:'', carb:'', pro:'', fat:'' }];
-  const header = `<div class="fi-header"><span>食物名稱</span><span style="color:var(--coral)">碳水</span><span style="color:var(--green)">蛋白</span><span style="color:var(--amber)">脂肪</span><span></span></div>`;
-  const rows = list.map((item, i) => `
-    <div class="food-item-row">
-      <input class="fi-name" type="text" placeholder="食物名稱" value="${item.name||''}" oninput="updateTotal('${mealId}')">
-      <input class="fi-carb" type="number" min="0" placeholder="0" value="${item.carb||''}" oninput="updateTotal('${mealId}')">
-      <input class="fi-pro"  type="number" min="0" placeholder="0" value="${item.pro||''}"  oninput="updateTotal('${mealId}')">
-      <input class="fi-fat"  type="number" min="0" placeholder="0" value="${item.fat||''}"  oninput="updateTotal('${mealId}')">
-      <button class="fi-del" onclick="delFoodItem(this, '${mealId}')" title="刪除">×</button>
-    </div>`).join('');
+  const header = '<div class="fi-header"><span>食物名稱</span>'
+    + '<span style="color:var(--coral)">碳水</span>'
+    + '<span style="color:var(--green)">蛋白</span>'
+    + '<span style="color:var(--amber)">脂肪</span><span></span></div>';
+  const rows = list.map(function(item) {
+    return '<div class="food-item-row">'
+      + '<input class="fi-name" type="text" placeholder="食物名稱" value="' + (item.name || '') + '"'
+      + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+      + '<input class="fi-carb" type="number" min="0" placeholder="0" value="' + (item.carb || '') + '"'
+      + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+      + '<input class="fi-pro" type="number" min="0" placeholder="0" value="' + (item.pro || '') + '"'
+      + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+      + '<input class="fi-fat" type="number" min="0" placeholder="0" value="' + (item.fat || '') + '"'
+      + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+      + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>'
+      + '</div>';
+  }).join('');
   return header + rows;
 }
 
-function addFoodItem(mealId) {
-  const container = document.getElementById(mealId+'-items');
+function addFoodItemToDish(mealId, dishIdx) {
+  const did = mealId + '-dish-' + dishIdx;
+  const container = document.getElementById(did + '-items');
   const row = document.createElement('div');
   row.className = 'food-item-row';
-  row.innerHTML = `
-    <input class="fi-name" type="text" placeholder="食物名稱" oninput="updateTotal('${mealId}')">
-    <input class="fi-carb" type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
-    <input class="fi-pro"  type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
-    <input class="fi-fat"  type="number" min="0" placeholder="0" oninput="updateTotal('${mealId}')">
-    <button class="fi-del" onclick="delFoodItem(this, '${mealId}')" title="刪除">×</button>`;
+  row.innerHTML = '<input class="fi-name" type="text" placeholder="食物名稱" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-carb" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-pro" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-fat" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>';
   container.appendChild(row);
   if (navigator.vibrate) navigator.vibrate(20);
   row.querySelector('.fi-name').focus();
 }
 
-function delFoodItem(btn, mealId) {
-  const container = document.getElementById(mealId+'-items');
+function delFoodItem(btn, mealId, dishIdx) {
+  const did = mealId + '-dish-' + dishIdx;
+  const container = document.getElementById(did + '-items');
   const rows = container.querySelectorAll('.food-item-row');
   if (rows.length <= 1) {
-    // Clear instead of delete if only one row
-    btn.closest('.food-item-row').querySelectorAll('input').forEach(i => i.value = '');
+    btn.closest('.food-item-row').querySelectorAll('input').forEach(function(i) { i.value = ''; });
   } else {
     btn.closest('.food-item-row').remove();
   }
-  updateTotal(mealId);
+  updateSaveBtnTotal(mealId);
 }
 
-function updateTotal(mealId) {
-  const items = getFoodItems(mealId);
+function updateSaveBtnTotal(mealId) {
   let tc=0, tp=0, tf=0;
-  items.forEach(i => { tc+=parseFloat(i.carb)||0; tp+=parseFloat(i.pro)||0; tf+=parseFloat(i.fat)||0; });
-  // Show running total on save button
-  const btn = document.querySelector(`#${mealId}-card .btn-save`);
-  if (btn && (tc||tp||tf)) {
-    btn.textContent = `儲存這餐（碳${Math.round(tc)} 蛋${Math.round(tp)} 脂${Math.round(tf)}g）`;
+  const dishCards = document.querySelectorAll('#' + mealId + '-dishes .dish-card');
+  dishCards.forEach(function(card) {
+    getDishItems(card).forEach(function(i) {
+      tc += parseFloat(i.carb) || 0;
+      tp += parseFloat(i.pro)  || 0;
+      tf += parseFloat(i.fat)  || 0;
+    });
+  });
+  const btn = document.querySelector('#' + mealId + '-card .btn-save');
+  if (btn && (tc || tp || tf)) {
+    btn.textContent = '儲存這餐（碳' + Math.round(tc) + ' 蛋' + Math.round(tp) + ' 脂' + Math.round(tf) + 'g）';
   } else if (btn) {
     btn.textContent = '儲存這餐';
   }
@@ -720,40 +987,43 @@ function updateTotal(mealId) {
 
 function updateBadge(mealId) {
   const meal = getMeal(mealId);
-  const hasData = meal.carb || meal.pro || meal.fat || meal.note || meal.photo;
-  const badge = document.getElementById(mealId+'-badge');
-  const card  = document.getElementById(mealId+'-card');
-  if (badge) { badge.textContent = hasData?'已記錄':'未記錄'; badge.className = 'meal-badge'+(hasData?' done':''); }
+  const hasData = meal.carb || meal.pro || meal.fat || meal.note
+    || meal.dishes.some(function(d) { return d.photo; });
+  const badge = document.getElementById(mealId + '-badge');
+  const card  = document.getElementById(mealId + '-card');
+  if (badge) { badge.textContent = hasData ? '已記錄' : '未記錄'; badge.className = 'meal-badge' + (hasData ? ' done' : ''); }
   if (card)  { card.classList.toggle('has-data', !!hasData); }
 }
 
 function updateSummary() {
   const k = dateKey();
   let tc=0, tp=0, tf=0;
-  MEALS_DEF.forEach(m => {
-    const d = (localData[k]||{})[m.id]||{};
-    tc += parseFloat(d.carb)||0; tp += parseFloat(d.pro)||0; tf += parseFloat(d.fat)||0;
+  MEALS_DEF.forEach(function(m) {
+    const d = (localData[k] || {})[m.id] || {};
+    tc += parseFloat(d.carb) || 0;
+    tp += parseFloat(d.pro)  || 0;
+    tf += parseFloat(d.fat)  || 0;
   });
   document.getElementById('s-carb').textContent = Math.round(tc);
   document.getElementById('s-pro').textContent  = Math.round(tp);
   document.getElementById('s-fat').textContent  = Math.round(tf);
-  const total = tc+tp+tf;
-  const pc = total ? Math.round(tc/total*100) : 0;
-  const pp = total ? Math.round(tp/total*100) : 0;
-  const pf = total ? 100-pc-pp : 0;
-  document.getElementById('rb-carb').style.width = pc+'%';
-  document.getElementById('rb-pro').style.width  = pp+'%';
-  document.getElementById('rb-fat').style.width  = pf+'%';
-  document.getElementById('pct-carb').textContent = pc+'%';
-  document.getElementById('pct-pro').textContent  = pp+'%';
-  document.getElementById('pct-fat').textContent  = pf+'%';
+  const total = tc + tp + tf;
+  const pc = total ? Math.round(tc / total * 100) : 0;
+  const pp = total ? Math.round(tp / total * 100) : 0;
+  const pf = total ? 100 - pc - pp : 0;
+  document.getElementById('rb-carb').style.width = pc + '%';
+  document.getElementById('rb-pro').style.width  = pp + '%';
+  document.getElementById('rb-fat').style.width  = pf + '%';
+  document.getElementById('pct-carb').textContent = pc + '%';
+  document.getElementById('pct-pro').textContent  = pp + '%';
+  document.getElementById('pct-fat').textContent  = pf + '%';
 }
 
 // ─── GOOGLE DRIVE ────────────────────────────────────────────────
 async function ensurePhotoFolder(parentId, dateStr) {
   const folderName = 'photos_' + dateStr;
   const search = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+    'https://www.googleapis.com/drive/v3/files?q=name=\'' + folderName + '\' and \'' + parentId + '\' in parents and mimeType=\'application/vnd.google-apps.folder\' and trashed=false&fields=files(id)',
     { headers: { Authorization: 'Bearer ' + accessToken } }
   );
   const sd = await search.json();
@@ -769,9 +1039,8 @@ async function ensurePhotoFolder(parentId, dateStr) {
 
 async function ensureFolder() {
   if (driveFolderId) return driveFolderId;
-  // Search for existing folder
   const search = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=name='${FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id)`,
+    'https://www.googleapis.com/drive/v3/files?q=name=\'' + FOLDER_NAME + '\' and mimeType=\'application/vnd.google-apps.folder\' and trashed=false&fields=files(id)',
     { headers: { Authorization: 'Bearer ' + accessToken } }
   );
   const sd = await search.json();
@@ -780,7 +1049,6 @@ async function ensureFolder() {
     localStorage.setItem('driveFolderId', driveFolderId);
     return driveFolderId;
   }
-  // Create folder
   const create = await fetch('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
     headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
@@ -794,26 +1062,23 @@ async function ensureFolder() {
 
 async function uploadJSON(folderId, filename, data) {
   const content = JSON.stringify(data, null, 2);
-  // Check if file exists
   const search = await fetch(
-    `https://www.googleapis.com/drive/v3/files?q=name='${filename}' and '${folderId}' in parents and trashed=false&fields=files(id)`,
+    'https://www.googleapis.com/drive/v3/files?q=name=\'' + filename + '\' and \'' + folderId + '\' in parents and trashed=false&fields=files(id)',
     { headers: { Authorization: 'Bearer ' + accessToken } }
   );
   const sd = await search.json();
   const blob = new Blob([content], { type: 'application/json' });
-  const meta = { name: filename, parents: [folderId] };
 
   if (sd.files && sd.files.length > 0) {
-    // Update existing file - use media endpoint with PATCH
     const fileId = sd.files[0].id;
-    const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files/' + fileId + '?uploadType=media', {
       method: 'PATCH',
       headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
       body: content
     });
     if (!res.ok) throw new Error('Update failed: ' + res.status + ' ' + await res.text());
   } else {
-    // Create new file
+    const meta = { name: filename, parents: [folderId] };
     const form = new FormData();
     form.append('metadata', new Blob([JSON.stringify(meta)], { type: 'application/json' }));
     form.append('file', blob);
@@ -829,7 +1094,7 @@ async function uploadPhoto(folderId, filename, dataUrl) {
   const mimeType = dataUrl.split(';')[0].split(':')[1];
   const byteChars = atob(base64);
   const byteArr = new Uint8Array(byteChars.length);
-  for (let i=0; i<byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
+  for (let i=0; i < byteChars.length; i++) byteArr[i] = byteChars.charCodeAt(i);
   const blob = new Blob([byteArr], { type: mimeType });
   const meta = { name: filename, parents: [folderId] };
   const form = new FormData();
@@ -845,17 +1110,16 @@ async function loadFromDrive() {
   try {
     const fid = await ensureFolder();
     const search = await fetch(
-      `https://www.googleapis.com/drive/v3/files?q=name='meal_data.json' and '${fid}' in parents and trashed=false&fields=files(id)`,
+      'https://www.googleapis.com/drive/v3/files?q=name=\'meal_data.json\' and \'' + fid + '\' in parents and trashed=false&fields=files(id)',
       { headers: { Authorization: 'Bearer ' + accessToken } }
     );
     const sd = await search.json();
     if (sd.files && sd.files.length > 0) {
       const fileId = sd.files[0].id;
-      const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      const r = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {
         headers: { Authorization: 'Bearer ' + accessToken }
       });
       const driveData = await r.json();
-      // Merge: Drive data wins for keys not in local
       localData = Object.assign({}, driveData, localData);
       localStorage.setItem('mealData', JSON.stringify(localData));
       render();
@@ -871,12 +1135,14 @@ async function syncToDrive() {
   toast('同步中...');
   try {
     const fid = await ensureFolder();
-    // Save data JSON (without photos to save space)
     const noPhoto = {};
-    Object.keys(localData).forEach(k => {
+    Object.keys(localData).forEach(function(k) {
       noPhoto[k] = {};
-      Object.keys(localData[k]).forEach(m => {
-        noPhoto[k][m] = { ...localData[k][m], photo: '' };
+      Object.keys(localData[k]).forEach(function(mealId) {
+        const m = localData[k][mealId];
+        noPhoto[k][mealId] = Object.assign({}, m, {
+          dishes: (m.dishes || []).map(function(d) { return Object.assign({}, d, { photo: '' }); })
+        });
       });
     });
     await uploadJSON(fid, 'meal_data.json', noPhoto);
@@ -916,7 +1182,7 @@ function exportJSON() {
 function toast(msg) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2200);
+  setTimeout(function() { t.classList.remove('show'); }, 2200);
 }
 function toggleMenu() {
   document.getElementById('user-menu').classList.toggle('open');
@@ -924,12 +1190,12 @@ function toggleMenu() {
 function closeMenu() {
   document.getElementById('user-menu').classList.remove('open');
 }
-document.addEventListener('click', e => {
+document.addEventListener('click', function(e) {
   if (!e.target.closest('#avatar-wrap') && !e.target.closest('#user-menu')) closeMenu();
 });
 
 // ─── BOOT ────────────────────────────────────────────────────────
-window.addEventListener('load', () => {
+window.addEventListener('load', function() {
   if (typeof google !== 'undefined' && google.accounts) initGoogle();
 });
 </script>
