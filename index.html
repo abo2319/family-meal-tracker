@@ -78,8 +78,12 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
   font-size: 14px; font-weight: 700;
   display: flex; align-items: center; justify-content: center; cursor: pointer;
 }
-.member-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+.member-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; align-items: center; }
 .member-strip::-webkit-scrollbar { display: none; }
+.member-label {
+  font-size: 12px; color: var(--gray-600); font-weight: 500;
+  white-space: nowrap; margin-right: 2px;
+}
 .m-chip {
   flex-shrink: 0; padding: 5px 14px; border-radius: 99px;
   border: 1.5px solid var(--gray-200); font-size: 13px; font-weight: 500;
@@ -727,22 +731,39 @@ function renderAvatar() {
 function renderMembers() {
   const strip = document.getElementById('member-strip');
   strip.innerHTML = '';
+  const mapped = EMAIL_TO_MEMBER[currentEmail()];
+  const isLockedToOne = !IS_DEV && !!mapped;
+
+  // For mapped family accounts, prepend a "當前使用者：" label so the single
+  // pill isn't floating alone in the strip — clarifies who the entry is for.
+  if (isLockedToOne) {
+    const label = document.createElement('span');
+    label.className = 'member-label';
+    label.textContent = '當前使用者：';
+    strip.appendChild(label);
+  }
+
   const visible = visibleMembersForInput();
   visible.forEach(function(m) {
     const chip = document.createElement('span');
     chip.className = 'm-chip' + (m === currentMember ? ' active' : '');
     chip.textContent = m;
-    chip.onclick = function() {
-      harvestVisibleDishes();
-      currentMember = m;
-      renderMembers();
-      render();
-    };
+    if (isLockedToOne) {
+      // Single-member view: the pill is a status badge, not a switcher.
+      chip.style.cursor = 'default';
+    } else {
+      chip.onclick = function() {
+        harvestVisibleDishes();
+        currentMember = m;
+        renderMembers();
+        render();
+      };
+    }
     strip.appendChild(chip);
   });
+
   // Only show the "+" add-member button in dev mode or for unmapped accounts.
-  // Mapped family members have a fixed single-member view and can't add.
-  if (IS_DEV || !EMAIL_TO_MEMBER[currentEmail()]) {
+  if (!isLockedToOne) {
     const add = document.createElement('span');
     add.className = 'm-chip add-chip';
     add.textContent = '＋';
