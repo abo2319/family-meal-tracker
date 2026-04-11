@@ -958,20 +958,29 @@ function fillDishItems(mealId, dishIdx, items) {
   const did = mealId + '-dish-' + dishIdx;
   const container = document.getElementById(did + '-items');
   if (!container) return;
-  const escAttr = function(s) {
-    return String(s || '').replace(/[<>"&]/g, function(c) {
-      return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
-    });
-  };
-  const sanitized = items.map(function(it) {
+  // Build raw (unescaped) items — renderFoodItems handles escaping internally now.
+  const raw = items.map(function(it) {
     return {
-      name: escAttr(it.name),
+      name: String(it.name || ''),
       carb: Math.max(0, Math.round(Number(it.carb) || 0)),
       pro:  Math.max(0, Math.round(Number(it.pro)  || 0)),
       fat:  Math.max(0, Math.round(Number(it.fat)  || 0))
     };
   });
-  container.innerHTML = renderFoodItems(mealId, dishIdx, sanitized);
+  // Persist to the model + localStorage so a subsequent re-render (e.g., after
+  // removeDish / addDish) doesn't wipe the AI-populated items.
+  const meal = getMeal(mealId);
+  if (!meal.dishes[dishIdx]) meal.dishes[dishIdx] = { photo: '', items: [] };
+  meal.dishes[dishIdx].items = raw;
+  const k = dateKey();
+  localData[k][mealId] = meal;
+  try {
+    localStorage.setItem('mealData', JSON.stringify(localData));
+  } catch (e) {
+    console.warn('localStorage quota:', e);
+  }
+  setSyncPending();
+  container.innerHTML = renderFoodItems(mealId, dishIdx, raw);
   updateSaveBtnTotal(mealId);
 }
 
@@ -1062,6 +1071,12 @@ function toggleCard(mealId) {
 }
 
 function renderFoodItems(mealId, dishIdx, items) {
+  // Escape HTML special chars in attribute values (Gemini may return names with & < > ").
+  const esc = function(s) {
+    return String(s == null ? '' : s).replace(/[<>"&]/g, function(c) {
+      return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+    });
+  };
   const list = (items && items.length > 0) ? items : [{ name:'', carb:'', pro:'', fat:'' }];
   const header = '<div class="fi-header"><span>食物名稱</span>'
     + '<span style="color:var(--coral)">碳水</span>'
@@ -1069,13 +1084,13 @@ function renderFoodItems(mealId, dishIdx, items) {
     + '<span style="color:var(--amber)">脂肪</span><span></span></div>';
   const rows = list.map(function(item) {
     return '<div class="food-item-row">'
-      + '<input class="fi-name" type="text" placeholder="食物名稱" value="' + (item.name || '') + '"'
+      + '<input class="fi-name" type="text" placeholder="食物名稱" value="' + esc(item.name) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-carb" type="number" min="0" placeholder="0" value="' + (item.carb || '') + '"'
+      + '<input class="fi-carb" type="number" min="0" placeholder="0" value="' + esc(item.carb) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-pro" type="number" min="0" placeholder="0" value="' + (item.pro || '') + '"'
+      + '<input class="fi-pro" type="number" min="0" placeholder="0" value="' + esc(item.pro) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-fat" type="number" min="0" placeholder="0" value="' + (item.fat || '') + '"'
+      + '<input class="fi-fat" type="number" min="0" placeholder="0" value="' + esc(item.fat) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
       + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>'
       + '</div>';
