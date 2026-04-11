@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="家庭飲食">
 <meta name="theme-color" content="#ffffff">
@@ -503,8 +504,34 @@ const FOLDER_NAME = 'FamilyMealTracker';
 let tokenClient, accessToken = null;
 let currentDate = new Date();
 let currentMember = '';
-let members = JSON.parse(localStorage.getItem('members') || '["Poppy","Mom","Max","Grace","Angela","Ning","Dean"]');
-let localData = JSON.parse(localStorage.getItem('mealData') || '{}');
+// Guarded parse: corrupt JSON in localStorage used to brick the whole app
+// because an uncaught throw at top-level halts script init before IS_DEV
+// (and everything else) is declared. Now we log, warn the user, and recover.
+function safeParse(key, fallback, label) {
+  const raw = localStorage.getItem(key);
+  if (raw == null) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error('[safeParse] corrupt localStorage.' + key + ':', e);
+    // Back up the corrupt payload so we don't lose it silently, then recover
+    try { localStorage.setItem(key + '.corrupt.' + Date.now(), raw); } catch (_) {}
+    try { localStorage.removeItem(key); } catch (_) {}
+    // Defer toast until toast() is defined (script keeps executing below)
+    setTimeout(function() {
+      if (typeof toast === 'function') toast('本機 ' + (label || key) + ' 資料損毀，已回復預設');
+    }, 0);
+    return fallback;
+  }
+}
+let members = safeParse('members', ['Poppy','Mom','Max','Grace','Angela','Ning','Dean'], '成員清單');
+if (!Array.isArray(members) || members.length === 0) {
+  members = ['Poppy','Mom','Max','Grace','Angela','Ning','Dean'];
+}
+let localData = safeParse('mealData', {}, '飲食記錄');
+if (localData == null || typeof localData !== 'object' || Array.isArray(localData)) {
+  localData = {};
+}
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
 
@@ -586,10 +613,20 @@ function signOut() {
 }
 
 // ─── APP INIT ────────────────────────────────────────────────────
+function ensureValidMember() {
+  if (!Array.isArray(members) || members.length === 0) {
+    members = ['全家'];
+    try { localStorage.setItem('members', JSON.stringify(members)); } catch (_) {}
+  }
+  if (!currentMember || members.indexOf(currentMember) === -1) {
+    currentMember = members[0];
+  }
+}
+
 function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
-  currentMember = members[0] || '全家';
+  ensureValidMember();
   renderAvatar();
   renderMembers();
   render();
@@ -649,6 +686,10 @@ function changeDate(d) {
 }
 
 function dateKey() {
+  // Belt-and-suspenders: make sure currentMember is always a real member so
+  // we never write data under a ghost pointer (e.g., after empty-members
+  // tampering or a Drive sync that removed the member).
+  ensureValidMember();
   return currentMember + '::' + currentDate.toISOString().slice(0,10);
 }
 
