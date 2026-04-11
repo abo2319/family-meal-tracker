@@ -369,6 +369,35 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
   gap: 10px; padding: 0 16px 14px;
 }
 .s-val.kcal-c { color: #8B5CF6; }
+
+/* Daily detail section (below the week chart) */
+.stats-daily-detail { padding: 0 16px 14px; }
+.stats-detail-head {
+  font-size: 14px; font-weight: 600; color: var(--gray-900);
+  margin-bottom: 10px;
+}
+.stats-meal-card {
+  background: #fff; border: 1px solid var(--gray-100);
+  border-radius: 12px; padding: 12px 14px; margin-bottom: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.smc-head {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
+.smc-icon { font-size: 18px; }
+.smc-name { font-size: 14px; font-weight: 600; color: var(--gray-900); }
+.smc-kcal {
+  margin-left: auto; font-size: 13px; font-weight: 600; color: #8B5CF6;
+}
+.smc-items {
+  font-size: 13px; color: var(--gray-600); line-height: 1.5;
+  word-break: break-word;
+}
+.smc-items.empty { color: var(--gray-400); }
+.smc-note {
+  margin-top: 4px; font-size: 12px; color: var(--gray-400); font-style: italic;
+}
 </style>
 </head>
 <body>
@@ -444,6 +473,7 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
     <div class="stats-chart-wrap">
       <div id="stats-chart"></div>
     </div>
+    <div class="stats-daily-detail" id="stats-daily-detail"></div>
     <div class="stats-avg-row" id="stats-avg-row"></div>
   </div>
 
@@ -1735,6 +1765,9 @@ window.addEventListener('load', function() {
 // ─── STATS VIEW ──────────────────────────────────────────────────
 var statsWeekOffset = 0;
 var statsMember = '';
+// 0-6 Mon-Sun, or null if the week has no data at all. Drives the
+// "X/X (X) 當日明細" card below the chart.
+var statsSelectedDayIdx = null;
 
 function showStats() {
   closeMenu();
@@ -1747,6 +1780,7 @@ function showStats() {
     statsMember = members.find(function(m){ return m !== 'Ning'; }) || '';
   }
   statsWeekOffset = 0;
+  statsSelectedDayIdx = null; // recompute default on each entry
   document.querySelector('.date-nav').style.display = 'none';
   document.querySelector('.summary-row').style.display = 'none';
   document.querySelector('.ratio-bar-wrap').style.display = 'none';
@@ -1790,8 +1824,21 @@ function renderStatsView() {
   var label = weekData.label;
   document.getElementById('stats-week-label').textContent = label;
 
-  // Chart
-  document.getElementById('stats-chart').innerHTML = renderWeeklySvgChart(weekData);
+  // Pick a default selected day for the detail section:
+  //   1. Today (if today is in this week)
+  //   2. Otherwise, the latest day with any data
+  //   3. Otherwise, null (hide detail section entirely)
+  if (statsSelectedDayIdx === null ||
+      statsSelectedDayIdx < 0 ||
+      statsSelectedDayIdx > 6) {
+    statsSelectedDayIdx = defaultDayIdxForWeek(weekData);
+  }
+
+  // Chart (now aware of which day is highlighted)
+  document.getElementById('stats-chart').innerHTML = renderWeeklySvgChart(weekData, statsSelectedDayIdx);
+
+  // Daily detail (3 meal cards for the selected day)
+  renderDailyDetail(weekData, statsSelectedDayIdx);
 
   // Averages — only counts days with actual intake, so a half-logged week
   // still shows a representative "per-day" figure instead of /7.
@@ -1810,6 +1857,7 @@ function renderStatsView() {
 
 function statsSelectMember(name) {
   statsMember = name;
+  statsSelectedDayIdx = null; // recompute default for the new member
   renderStatsView();
 }
 
@@ -1817,9 +1865,94 @@ function statsChangeWeek(delta) {
   statsWeekOffset += delta;
   // Don't allow navigating into the future
   if (statsWeekOffset > 0) statsWeekOffset = 0;
+  // Reset selected day so the new week starts on its own natural default
+  // (today if current week, or latest-with-data otherwise).
+  statsSelectedDayIdx = null;
   // Always re-render so the label and chart reflect the current offset,
   // including the clamped state.
   renderStatsView();
+}
+
+// Called from onclick attributes inside the SVG chart (rects built in
+// renderWeeklySvgChart). Must be global so inline handlers can reach it.
+function statsSelectDay(idx) {
+  if (idx == null || idx < 0 || idx > 6) return;
+  statsSelectedDayIdx = idx;
+  renderStatsView();
+}
+
+function defaultDayIdxForWeek(weekData) {
+  if (statsWeekOffset === 0) {
+    // Current week: default to today if it has data, else the last day with data, else today anyway
+    var now = new Date();
+    var day = now.getDay() || 7;
+    var todayIdx = day - 1; // 0..6 (Mon..Sun)
+    if (weekData.days[todayIdx] && weekData.days[todayIdx].kcal > 0) return todayIdx;
+    for (var i = todayIdx; i >= 0; i--) {
+      if (weekData.days[i] && weekData.days[i].kcal > 0) return i;
+    }
+    return todayIdx; // show today even if empty
+  }
+  // Past weeks: latest day with data, else last day of the week
+  for (var j = 6; j >= 0; j--) {
+    if (weekData.days[j] && weekData.days[j].kcal > 0) return j;
+  }
+  return 6;
+}
+
+function collectMealItemNames(meal) {
+  var names = [];
+  if (!meal) return names;
+  (meal.dishes || []).forEach(function(d) {
+    (d.items || []).forEach(function(it) {
+      if (it && it.name && String(it.name).trim()) {
+        names.push(String(it.name).trim());
+      }
+    });
+  });
+  return names;
+}
+
+function mealKcal(meal) {
+  var t = computeMealTotals(meal);
+  return Math.round((t.carb || 0) * 4 + (t.pro || 0) * 4 + (t.fat || 0) * 9);
+}
+
+function renderDailyDetail(weekData, idx) {
+  var container = document.getElementById('stats-daily-detail');
+  if (!container) return;
+  if (idx == null || !weekData.days[idx]) { container.innerHTML = ''; return; }
+  var day = weekData.days[idx];
+  var dayKey = statsMember + '::' + day.dateStr;
+  var dayData = localData[dayKey] || {};
+
+  var cards = MEALS_DEF.map(function(def) {
+    var meal = dayData[def.id];
+    var names = collectMealItemNames(meal);
+    var kcal = mealKcal(meal);
+    var note = (meal && meal.note) ? String(meal.note).trim() : '';
+    var namesHtml;
+    if (names.length) {
+      namesHtml = '<div class="smc-items">' + names.map(escAttr).join('、') + '</div>';
+    } else {
+      namesHtml = '<div class="smc-items empty">—</div>';
+    }
+    var noteHtml = note ? '<div class="smc-note">備註：' + escAttr(note) + '</div>' : '';
+    var kcalStr = kcal > 0 ? (kcal + ' 大卡') : '–';
+    return '<div class="stats-meal-card">'
+      +   '<div class="smc-head">'
+      +     '<span class="smc-icon">' + def.icon + '</span>'
+      +     '<span class="smc-name">' + def.name + '</span>'
+      +     '<span class="smc-kcal">' + kcalStr + '</span>'
+      +   '</div>'
+      +   namesHtml
+      +   noteHtml
+      + '</div>';
+  }).join('');
+
+  container.innerHTML =
+    '<div class="stats-detail-head">' + escAttr(day.label) + ' 當日明細</div>'
+    + cards;
 }
 
 function buildWeekData(member, weekOffset) {
@@ -1869,6 +2002,8 @@ function buildWeekData(member, weekOffset) {
     // Atwater factors: 4 kcal/g carb, 4 kcal/g protein, 9 kcal/g fat.
     var kcal = carb * 4 + pro * 4 + fat * 9;
     days.push({
+      idx: i,
+      dateStr: dateStr,
       label: (d.getMonth()+1) + '/' + d.getDate() + ' (' + weekDayNames[i] + ')',
       carb: Math.round(carb), pro: Math.round(pro), fat: Math.round(fat),
       kcal: Math.round(kcal)
@@ -1883,7 +2018,7 @@ function buildWeekData(member, weekOffset) {
   };
 }
 
-function renderWeeklySvgChart(weekData) {
+function renderWeeklySvgChart(weekData, selectedIdx) {
   var days = weekData.days;
   var BAR_W = 220; // max bar width in SVG units
   var ROW_H = 36;
@@ -1912,14 +2047,25 @@ function renderWeeklySvgChart(weekData) {
     var barY = y + (ROW_H - barH) / 2;
     // Show kcal (meaningful energy intake) instead of gram sum (meaningless).
     var totalStr = d.kcal > 0 ? d.kcal + ' 大卡' : '–';
+    var isSelected = (i === selectedIdx);
+    // Pale-blue highlight stripe behind the selected row so users can tell
+    // which day the detail section below corresponds to.
+    var hi = isSelected
+      ? '<rect x="0" y="' + y + '" width="' + SVG_W + '" height="' + (ROW_H - 2) + '" rx="6" fill="#E8F1FF"/>'
+      : '';
     return [
-      '<text x="' + (LABEL_W - 6) + '" y="' + (barY + 13) + '" text-anchor="end" font-size="11" fill="#9A9890">' + d.label + '</text>',
+      '<g onclick="statsSelectDay(' + i + ')" style="cursor:pointer;">',
+      hi,
+      '<text x="' + (LABEL_W - 6) + '" y="' + (barY + 13) + '" text-anchor="end" font-size="11" fill="' + (isSelected ? '#2563EB' : '#9A9890') + '">' + d.label + '</text>',
       total > 0 ? [
         '<rect x="' + LABEL_W + '" y="' + barY + '" width="' + wCarb + '" height="' + barH + '" rx="3" fill="#D85A30"/>',
         '<rect x="' + xPro  + '" y="' + barY + '" width="' + wPro  + '" height="' + barH + '" rx="0" fill="#1D9E75"/>',
         '<rect x="' + xFat  + '" y="' + barY + '" width="' + wFat  + '" height="' + barH + '" rx="0" fill="#BA7517"/>',
       ].join('') : '<rect x="' + LABEL_W + '" y="' + (barY+7) + '" width="' + BAR_W + '" height="4" rx="2" fill="#E0DED6"/>',
-      '<text x="' + (LABEL_W + BAR_W + 4) + '" y="' + (barY + 13) + '" font-size="10" fill="#5F5E5A">' + totalStr + '</text>'
+      '<text x="' + (LABEL_W + BAR_W + 4) + '" y="' + (barY + 13) + '" font-size="10" fill="#5F5E5A">' + totalStr + '</text>',
+      // Transparent overlay spanning the full row so taps on empty space still select the day.
+      '<rect x="0" y="' + y + '" width="' + SVG_W + '" height="' + (ROW_H - 2) + '" fill="transparent"/>',
+      '</g>'
     ].join('');
   });
 
