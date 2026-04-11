@@ -1426,7 +1426,9 @@ function buildWeekData(member, weekOffset) {
   var day = now.getDay() || 7; // make Sunday = 7
   var monday = new Date(now);
   monday.setDate(now.getDate() - day + 1 + weekOffset * 7);
-  monday.setHours(0,0,0,0);
+  // Use noon local so toISOString().slice(0,10) returns the correct local date
+  // in any timezone (otherwise midnight local + UTC+8 = previous UTC day → keys off by one).
+  monday.setHours(12,0,0,0);
 
   var days = [];
   var weekDayNames = ['一','二','三','四','五','六','日'];
@@ -1434,7 +1436,8 @@ function buildWeekData(member, weekOffset) {
     var d = new Date(monday);
     d.setDate(monday.getDate() + i);
     var dateStr = d.toISOString().slice(0,10);
-    var dayData = localData[dateStr] || {};
+    // localData keys are "<member>::<yyyy-mm-dd>" (see dateKey())
+    var dayData = localData[member + '::' + dateStr] || {};
     var carb = 0, pro = 0, fat = 0;
     Object.keys(dayData).forEach(function(mealId) {
       var meal = dayData[mealId];
