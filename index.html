@@ -1256,6 +1256,9 @@ function updateSaveBtnTotal(mealId) {
   } else if (btn) {
     btn.textContent = '儲存這餐';
   }
+  // Also refresh the top summary so it reflects live typing (updateSummary
+  // now prefers DOM values over model for visible meal cards).
+  updateSummary();
 }
 
 function updateBadge(mealId) {
@@ -1271,6 +1274,23 @@ function updateSummary() {
   const k = dateKey();
   let tc = 0, tp = 0, tf = 0;
   MEALS_DEF.forEach(function(m) {
+    // Prefer live DOM values for currently-rendered meals so the summary
+    // reflects what the user is typing right now (before any save/harvest).
+    // Fall back to persisted model for meals not currently in the DOM.
+    const dishCards = document.querySelectorAll('#' + m.id + '-dishes .dish-card');
+    if (dishCards.length > 0) {
+      dishCards.forEach(function(card) {
+        card.querySelectorAll('.food-item-row').forEach(function(row) {
+          const c = row.querySelector('.fi-carb');
+          const p = row.querySelector('.fi-pro');
+          const f = row.querySelector('.fi-fat');
+          tc += (c ? parseFloat(c.value) : 0) || 0;
+          tp += (p ? parseFloat(p.value) : 0) || 0;
+          tf += (f ? parseFloat(f.value) : 0) || 0;
+        });
+      });
+      return;
+    }
     const meal = (localData[k] || {})[m.id];
     if (!meal) return;
     const t = computeMealTotals(meal);
