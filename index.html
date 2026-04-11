@@ -575,9 +575,41 @@ function canViewNingStats() {
 }
 function applyEmailRouting() {
   const target = EMAIL_TO_MEMBER[currentEmail()];
-  if (target && members.indexOf(target) !== -1) {
-    currentMember = target;
+  if (!target) return;
+  // Make sure the member exists in the local list — a freshly-installed PWA
+  // on a new device may have only the default list, and Drive sync hasn't
+  // run yet. Auto-add so the user isn't stuck without a chip.
+  if (members.indexOf(target) === -1) {
+    members.push(target);
+    try { localStorage.setItem('members', JSON.stringify(members)); } catch(_) {}
   }
+  currentMember = target;
+}
+
+// Who gets to see which member chips.
+// - Dev mode or unmapped email: see everyone (legacy/admin behaviour)
+// - Mapped email: see ONLY their own member (record view)
+// - Mapped email + stats view: see own member + Ning if they're a Ning viewer
+function visibleMembersForInput() {
+  if (IS_DEV) return members.slice();
+  const mine = EMAIL_TO_MEMBER[currentEmail()];
+  if (!mine) return members.slice();
+  return members.filter(function(m) { return m === mine; });
+}
+function visibleMembersForStats() {
+  if (IS_DEV) return members.slice();
+  const mine = EMAIL_TO_MEMBER[currentEmail()];
+  if (!mine) {
+    // Unmapped account: see everyone except Ning unless authorized.
+    return members.filter(function(m) { return m !== 'Ning' || canViewNingStats(); });
+  }
+  const out = [mine];
+  // Ning viewers (shunyu1123 / ytning4 / s460585) get Ning chip too.
+  // s460585 is already Ning so the dedupe check below covers that case.
+  if (canViewNingStats() && mine !== 'Ning' && members.indexOf('Ning') !== -1) {
+    out.push('Ning');
+  }
+  return out;
 }
 
 const MEALS_DEF = [
@@ -695,7 +727,8 @@ function renderAvatar() {
 function renderMembers() {
   const strip = document.getElementById('member-strip');
   strip.innerHTML = '';
-  members.forEach(function(m) {
+  const visible = visibleMembersForInput();
+  visible.forEach(function(m) {
     const chip = document.createElement('span');
     chip.className = 'm-chip' + (m === currentMember ? ' active' : '');
     chip.textContent = m;
@@ -707,11 +740,15 @@ function renderMembers() {
     };
     strip.appendChild(chip);
   });
-  const add = document.createElement('span');
-  add.className = 'm-chip add-chip';
-  add.textContent = '＋';
-  add.onclick = addMember;
-  strip.appendChild(add);
+  // Only show the "+" add-member button in dev mode or for unmapped accounts.
+  // Mapped family members have a fixed single-member view and can't add.
+  if (IS_DEV || !EMAIL_TO_MEMBER[currentEmail()]) {
+    const add = document.createElement('span');
+    add.className = 'm-chip add-chip';
+    add.textContent = '＋';
+    add.onclick = addMember;
+    strip.appendChild(add);
+  }
 }
 
 function addMember() {
@@ -1709,10 +1746,9 @@ function renderStatsView() {
   // Member chips — use DOM construction with index-based handler to avoid
   // injecting the (potentially user-controlled, drive-synced) member name
   // into an onclick attribute or HTML text.
-  // Hide Ning entirely if the current account isn't authorized to see it.
-  var visibleMembers = members.filter(function(m) {
-    return m !== 'Ning' || canViewNingStats();
-  });
+  // A mapped user only sees their own member chip (+ Ning if authorized).
+  // Dev / unmapped users fall back to the full list minus Ning-when-denied.
+  var visibleMembers = visibleMembersForStats();
   // If the active stats member just got filtered out, fall back to the first
   // visible one so the chart isn't blank.
   if (visibleMembers.indexOf(statsMember) === -1) {
