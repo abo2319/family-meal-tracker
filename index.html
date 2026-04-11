@@ -614,7 +614,12 @@ function renderMembers() {
     const chip = document.createElement('span');
     chip.className = 'm-chip' + (m === currentMember ? ' active' : '');
     chip.textContent = m;
-    chip.onclick = function() { currentMember = m; renderMembers(); render(); };
+    chip.onclick = function() {
+      harvestVisibleDishes();
+      currentMember = m;
+      renderMembers();
+      render();
+    };
     strip.appendChild(chip);
   });
   const add = document.createElement('span');
@@ -627,6 +632,8 @@ function renderMembers() {
 function addMember() {
   const name = prompt('輸入家庭成員名稱：');
   if (!name || !name.trim()) return;
+  // Save any in-progress typing on the current member's view first.
+  harvestVisibleDishes();
   members.push(name.trim());
   localStorage.setItem('members', JSON.stringify(members));
   currentMember = name.trim();
@@ -635,6 +642,8 @@ function addMember() {
 
 // ─── DATE ────────────────────────────────────────────────────────
 function changeDate(d) {
+  // Save unsaved inputs under the current date before navigating away.
+  harvestVisibleDishes();
   currentDate.setDate(currentDate.getDate() + d);
   render();
 }
@@ -671,6 +680,96 @@ function getMeal(mealId) {
     };
   }
   return localData[k][mealId];
+}
+
+// ─── MODEL HELPERS ───────────────────────────────────────────────
+// Single source of truth for meal totals — always compute from dishes[].items
+// rather than stale meal.carb/pro/fat (which are only written on saveMeal).
+function computeMealTotals(meal) {
+  let carb = 0, pro = 0, fat = 0;
+  if (meal && meal.dishes) {
+    meal.dishes.forEach(function(d) {
+      (d.items || []).forEach(function(it) {
+        carb += parseFloat(it.carb) || 0;
+        pro  += parseFloat(it.pro)  || 0;
+        fat  += parseFloat(it.fat)  || 0;
+      });
+    });
+  }
+  // Fallback for legacy entries without dishes but with totals already saved
+  if (meal && !meal.dishes) {
+    carb += parseFloat(meal.carb) || 0;
+    pro  += parseFloat(meal.pro)  || 0;
+    fat  += parseFloat(meal.fat)  || 0;
+  }
+  return { carb: carb, pro: pro, fat: fat };
+}
+
+function hasMealData(meal) {
+  if (!meal) return false;
+  if (meal.note) return true;
+  if (meal.dishes) {
+    return meal.dishes.some(function(d) {
+      if (d.photo) return true;
+      return (d.items || []).some(function(it) {
+        return (it.name && it.name.trim())
+          || (parseFloat(it.carb) || 0) > 0
+          || (parseFloat(it.pro)  || 0) > 0
+          || (parseFloat(it.fat)  || 0) > 0;
+      });
+    });
+  }
+  return false;
+}
+
+// HTML attribute-safe escape — use anywhere user/AI strings go into innerHTML.
+function escAttr(s) {
+  return String(s == null ? '' : s).replace(/[<>"&]/g, function(c) {
+    return { '<':'&lt;', '>':'&gt;', '"':'&quot;', '&':'&amp;' }[c];
+  });
+}
+
+// Scrape the currently-rendered meal cards and write their DOM state back
+// into localData. Call this BEFORE any path that destroys the meal cards'
+// innerHTML (render, rerenderDishes, changeDate, switch member, showStats),
+// so unsaved typing isn't lost. This is the cornerstone fix for C3 + H6.
+function harvestVisibleDishes() {
+  if (typeof MEALS_DEF === 'undefined') return;
+  const k = dateKey();
+  if (!localData[k]) localData[k] = {};
+  let touched = false;
+  MEALS_DEF.forEach(function(m) {
+    const dishesContainer = document.getElementById(m.id + '-dishes');
+    if (!dishesContainer) return;
+    const dishCards = dishesContainer.querySelectorAll('.dish-card');
+    if (dishCards.length === 0) return;
+    const existing = localData[k][m.id] || { note: '', dishes: [] };
+    const harvestedDishes = [];
+    dishCards.forEach(function(card, idx) {
+      // Photo: prefer the model's existing base64 (we never re-upload it here)
+      const existingPhoto = existing.dishes && existing.dishes[idx] && existing.dishes[idx].photo || '';
+      const imgEl = card.querySelector('.photo-zone img');
+      const photo = existingPhoto || (imgEl ? imgEl.src : '');
+      const items = [];
+      card.querySelectorAll('.food-item-row').forEach(function(row) {
+        items.push({
+          name: row.querySelector('.fi-name') ? row.querySelector('.fi-name').value : '',
+          carb: row.querySelector('.fi-carb') ? row.querySelector('.fi-carb').value : '',
+          pro:  row.querySelector('.fi-pro')  ? row.querySelector('.fi-pro').value  : '',
+          fat:  row.querySelector('.fi-fat')  ? row.querySelector('.fi-fat').value  : ''
+        });
+      });
+      harvestedDishes.push({ photo: photo, items: items });
+    });
+    const noteInput = document.getElementById(m.id + '-note');
+    const note = noteInput ? noteInput.value : (existing.note || '');
+    localData[k][m.id] = { note: note, dishes: harvestedDishes };
+    touched = true;
+  });
+  if (touched) {
+    try { localStorage.setItem('mealData', JSON.stringify(localData)); }
+    catch (e) { console.warn('harvest: localStorage quota', e); }
+  }
 }
 
 function saveMeal(mealId) {
@@ -727,12 +826,16 @@ function getDishItems(card) {
 
 // ─── DISH MANAGEMENT ─────────────────────────────────────────────
 function addDish(mealId) {
+  // Save any unsaved typing across the whole date first, then mutate.
+  harvestVisibleDishes();
   const meal = getMeal(mealId);
   meal.dishes.push({ photo: '', items: [] });
   const k = dateKey();
   localData[k][mealId] = meal;
-  localStorage.setItem('mealData', JSON.stringify(localData));
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); }
+  catch (e) { console.warn('addDish: localStorage quota', e); }
   rerenderDishes(mealId);
+  updateSummary();
   // Auto-open camera for the new dish so elderly users don't need an extra tap
   const newIdx = meal.dishes.length - 1;
   const fileInput = document.getElementById(mealId + '-dish-' + newIdx + '-file');
@@ -740,14 +843,19 @@ function addDish(mealId) {
 }
 
 function removeDish(mealId, dishIdx) {
+  // Save all other dishes' DOM values before splicing so they aren't lost.
+  harvestVisibleDishes();
   const meal = getMeal(mealId);
   if (meal.dishes.length <= 1) return;
   meal.dishes.splice(dishIdx, 1);
   const k = dateKey();
   localData[k][mealId] = meal;
-  localStorage.setItem('mealData', JSON.stringify(localData));
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); }
+  catch (e) { console.warn('removeDish: localStorage quota', e); }
   rerenderDishes(mealId);
   updateSaveBtnTotal(mealId);
+  updateSummary();
+  updateBadge(mealId);
 }
 
 function rerenderDishes(mealId) {
@@ -782,6 +890,12 @@ function compressImage(dataUrl, maxSize, quality) {
 function handlePhoto(mealId, dishIdx, input) {
   const file = input.files[0]; if (!file) return;
   const reader = new FileReader();
+  // Fail-safe: if the file can't be read, surface the error instead of silently
+  // leaving the AI button stuck disabled.
+  reader.onerror = function() {
+    console.error('FileReader error:', reader.error);
+    toast('讀取照片失敗：' + (reader.error && reader.error.message || '未知錯誤'));
+  };
   reader.onload = async function(e) {
     const did = mealId + '-dish-' + dishIdx;
     const zone = document.getElementById(did + '-photo');
@@ -982,6 +1096,8 @@ function fillDishItems(mealId, dishIdx, items) {
   setSyncPending();
   container.innerHTML = renderFoodItems(mealId, dishIdx, raw);
   updateSaveBtnTotal(mealId);
+  updateSummary();
+  updateBadge(mealId);
 }
 
 // ─── RENDER ──────────────────────────────────────────────────────
@@ -991,8 +1107,7 @@ function render() {
   list.innerHTML = '';
   MEALS_DEF.forEach(function(m) {
     const meal = getMeal(m.id);
-    const hasData = meal.carb || meal.pro || meal.fat || meal.note
-      || meal.dishes.some(function(d) { return d.photo || (d.items && d.items.length > 0 && d.items[0].name); });
+    const hasData = hasMealData(meal);
     const card = document.createElement('div');
     card.className = 'meal-card' + (hasData ? ' has-data' : '');
     card.id = m.id + '-card';
@@ -1010,7 +1125,7 @@ function render() {
       + '<div id="' + m.id + '-dishes">' + renderDishes(m.id, meal.dishes) + '</div>'
       + '<button class="add-dish-btn" onclick="addDish(\'' + m.id + '\')">📷 新增一道菜</button>'
       + '<div class="note-row" style="margin-bottom:10px;">'
-      + '<input type="text" id="' + m.id + '-note" placeholder="備註..." value="' + (meal.note || '') + '">'
+      + '<input type="text" id="' + m.id + '-note" placeholder="備註..." value="' + escAttr(meal.note) + '">'
       + '</div>'
       + '<div class="save-row">'
       + '<button class="btn-save" onclick="saveMeal(\'' + m.id + '\')">儲存這餐</button>'
@@ -1145,22 +1260,21 @@ function updateSaveBtnTotal(mealId) {
 
 function updateBadge(mealId) {
   const meal = getMeal(mealId);
-  const hasData = meal.carb || meal.pro || meal.fat || meal.note
-    || meal.dishes.some(function(d) { return d.photo; });
+  const has = hasMealData(meal);
   const badge = document.getElementById(mealId + '-badge');
   const card  = document.getElementById(mealId + '-card');
-  if (badge) { badge.textContent = hasData ? '已記錄' : '未記錄'; badge.className = 'meal-badge' + (hasData ? ' done' : ''); }
-  if (card)  { card.classList.toggle('has-data', !!hasData); }
+  if (badge) { badge.textContent = has ? '已記錄' : '未記錄'; badge.className = 'meal-badge' + (has ? ' done' : ''); }
+  if (card)  { card.classList.toggle('has-data', has); }
 }
 
 function updateSummary() {
   const k = dateKey();
-  let tc=0, tp=0, tf=0;
+  let tc = 0, tp = 0, tf = 0;
   MEALS_DEF.forEach(function(m) {
-    const d = (localData[k] || {})[m.id] || {};
-    tc += parseFloat(d.carb) || 0;
-    tp += parseFloat(d.pro)  || 0;
-    tf += parseFloat(d.fat)  || 0;
+    const meal = (localData[k] || {})[m.id];
+    if (!meal) return;
+    const t = computeMealTotals(meal);
+    tc += t.carb; tp += t.pro; tf += t.fat;
   });
   document.getElementById('s-carb').textContent = Math.round(tc);
   document.getElementById('s-pro').textContent  = Math.round(tp);
@@ -1363,6 +1477,8 @@ var statsMember = '';
 
 function showStats() {
   closeMenu();
+  // Save any unsaved record-view typing before hiding it.
+  harvestVisibleDishes();
   statsMember = currentMember || (members[0] || '');
   statsWeekOffset = 0;
   document.querySelector('.date-nav').style.display = 'none';
@@ -1382,12 +1498,18 @@ function hideStats() {
 }
 
 function renderStatsView() {
-  // Member chips
+  // Member chips — use DOM construction with index-based handler to avoid
+  // injecting the (potentially user-controlled, drive-synced) member name
+  // into an onclick attribute or HTML text.
   var strip = document.getElementById('stats-member-strip');
-  strip.innerHTML = members.map(function(m) {
-    var active = m === statsMember ? ' m-chip active' : ' m-chip';
-    return '<span class="' + active.trim() + '" onclick="statsSelectMember(\'' + m + '\')">' + m + '</span>';
-  }).join('');
+  strip.innerHTML = '';
+  members.forEach(function(m, idx) {
+    var chip = document.createElement('span');
+    chip.className = 'm-chip' + (m === statsMember ? ' active' : '');
+    chip.textContent = m;
+    chip.onclick = function() { statsSelectMember(members[idx]); };
+    strip.appendChild(chip);
+  });
 
   // Week label
   var weekData = buildWeekData(statsMember, statsWeekOffset);
@@ -1416,7 +1538,10 @@ function statsSelectMember(name) {
 
 function statsChangeWeek(delta) {
   statsWeekOffset += delta;
-  if (statsWeekOffset > 0) { statsWeekOffset = 0; return; }
+  // Don't allow navigating into the future
+  if (statsWeekOffset > 0) statsWeekOffset = 0;
+  // Always re-render so the label and chart reflect the current offset,
+  // including the clamped state.
   renderStatsView();
 }
 
