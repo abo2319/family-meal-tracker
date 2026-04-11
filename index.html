@@ -318,6 +318,51 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 }
 .um-item:hover { background: var(--gray-50); }
 .um-item.danger { color: var(--coral); }
+
+/* ── Stats View ── */
+#stats-view {
+  display: none; flex-direction: column; padding-bottom: 100px;
+}
+#stats-view.visible { display: flex; }
+.stats-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 16px 10px;
+}
+.stats-back-btn {
+  background: none; border: 1px solid var(--gray-200); border-radius: 99px;
+  padding: 6px 14px; font-size: 13px; color: var(--gray-600);
+  cursor: pointer; font-family: inherit;
+}
+.stats-back-btn:active { background: var(--gray-100); }
+.stats-title { font-size: 17px; font-weight: 700; }
+.stats-member-strip {
+  display: flex; gap: 6px; overflow-x: auto; padding: 0 16px 10px;
+  scrollbar-width: none;
+}
+.stats-member-strip::-webkit-scrollbar { display: none; }
+.stats-week-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px 12px;
+}
+.stats-week-label { font-size: 14px; font-weight: 600; color: var(--gray-900); }
+.stats-week-arrow {
+  width: 34px; height: 34px; border-radius: 50%;
+  background: #fff; border: 1px solid var(--gray-200);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; cursor: pointer;
+}
+.stats-week-arrow:active { background: var(--gray-100); }
+.stats-chart-wrap {
+  margin: 0 16px 14px; background: #fff;
+  border-radius: var(--radius); border: 1px solid var(--gray-100);
+  padding: 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+.stats-chart-wrap svg { display: block; width: 100%; }
+.stats-avg-row {
+  display: grid; grid-template-columns: repeat(3,1fr);
+  gap: 10px; padding: 0 16px 14px;
+}
 </style>
 </head>
 <body>
@@ -338,7 +383,10 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
   <div class="topbar">
     <div class="topbar-row1">
       <span class="app-title">🥗 家庭飲食</span>
-      <div id="avatar-wrap" onclick="toggleMenu()"></div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button onclick="showStats()" style="background:none;border:1px solid var(--gray-200);border-radius:99px;padding:5px 12px;font-size:13px;cursor:pointer;color:var(--gray-600);font-family:inherit;">📊 統計</button>
+        <div id="avatar-wrap" onclick="toggleMenu()"></div>
+      </div>
     </div>
     <div class="member-strip" id="member-strip">
       <span class="m-chip add-chip" onclick="addMember()">＋ 新增成員</span>
@@ -375,6 +423,24 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 
   <div class="meals-list" id="meals-list"></div>
 
+  <!-- STATS VIEW -->
+  <div id="stats-view">
+    <div class="stats-header">
+      <button class="stats-back-btn" onclick="hideStats()">‹ 返回記錄</button>
+      <span class="stats-title">📊 營養統計</span>
+    </div>
+    <div class="stats-member-strip" id="stats-member-strip"></div>
+    <div class="stats-week-nav">
+      <div class="stats-week-arrow" onclick="statsChangeWeek(-1)">‹</div>
+      <span class="stats-week-label" id="stats-week-label"></span>
+      <div class="stats-week-arrow" onclick="statsChangeWeek(1)">›</div>
+    </div>
+    <div class="stats-chart-wrap">
+      <div id="stats-chart"></div>
+    </div>
+    <div class="stats-avg-row" id="stats-avg-row"></div>
+  </div>
+
   <div class="sync-bar">
     <div class="sync-info">
       <span class="sync-dot ok" id="sync-dot"></span>
@@ -385,6 +451,7 @@ body { font-family: 'Noto Sans TC', sans-serif; background: var(--gray-50); colo
 </div>
 
 <div class="user-menu" id="user-menu">
+  <div class="um-item" onclick="showStats();closeMenu()">📊 統計</div>
   <div class="um-item" onclick="syncToDrive()">☁️ 立即同步</div>
   <div class="um-item" onclick="exportJSON()">📥 匯出資料</div>
   <div class="um-item danger" onclick="signOut()">登出</div>
@@ -1198,6 +1265,168 @@ document.addEventListener('click', function(e) {
 window.addEventListener('load', function() {
   if (typeof google !== 'undefined' && google.accounts) initGoogle();
 });
+
+// ─── STATS VIEW ──────────────────────────────────────────────────
+var statsWeekOffset = 0;
+var statsMember = '';
+
+function showStats() {
+  closeMenu();
+  statsMember = currentMember || (members[0] || '');
+  statsWeekOffset = 0;
+  document.querySelector('.date-nav').style.display = 'none';
+  document.querySelector('.summary-row').style.display = 'none';
+  document.querySelector('.ratio-bar-wrap').style.display = 'none';
+  document.getElementById('meals-list').style.display = 'none';
+  document.getElementById('stats-view').classList.add('visible');
+  renderStatsView();
+}
+
+function hideStats() {
+  document.getElementById('stats-view').classList.remove('visible');
+  document.querySelector('.date-nav').style.display = '';
+  document.querySelector('.summary-row').style.display = '';
+  document.querySelector('.ratio-bar-wrap').style.display = '';
+  document.getElementById('meals-list').style.display = '';
+}
+
+function renderStatsView() {
+  // Member chips
+  var strip = document.getElementById('stats-member-strip');
+  strip.innerHTML = members.map(function(m) {
+    var active = m === statsMember ? ' m-chip active' : ' m-chip';
+    return '<span class="' + active.trim() + '" onclick="statsSelectMember(\'' + m + '\')">' + m + '</span>';
+  }).join('');
+
+  // Week label
+  var weekData = buildWeekData(statsMember, statsWeekOffset);
+  var label = weekData.label;
+  document.getElementById('stats-week-label').textContent = label;
+
+  // Chart
+  document.getElementById('stats-chart').innerHTML = renderWeeklySvgChart(weekData);
+
+  // Averages
+  var days = weekData.days;
+  var count = days.filter(function(d) { return d.carb + d.pro + d.fat > 0; }).length || 1;
+  var avgCarb = Math.round(days.reduce(function(s,d){return s+d.carb;},0) / count);
+  var avgPro  = Math.round(days.reduce(function(s,d){return s+d.pro;},0)  / count);
+  var avgFat  = Math.round(days.reduce(function(s,d){return s+d.fat;},0)  / count);
+  document.getElementById('stats-avg-row').innerHTML =
+    '<div class="sum-card"><div class="s-label">平均碳水</div><div class="s-val carb-c">' + avgCarb + '</div><div class="s-unit">克/天</div></div>' +
+    '<div class="sum-card"><div class="s-label">平均蛋白</div><div class="s-val pro-c">'  + avgPro  + '</div><div class="s-unit">克/天</div></div>' +
+    '<div class="sum-card"><div class="s-label">平均脂肪</div><div class="s-val fat-c">'  + avgFat  + '</div><div class="s-unit">克/天</div></div>';
+}
+
+function statsSelectMember(name) {
+  statsMember = name;
+  renderStatsView();
+}
+
+function statsChangeWeek(delta) {
+  statsWeekOffset += delta;
+  if (statsWeekOffset > 0) { statsWeekOffset = 0; return; }
+  renderStatsView();
+}
+
+function buildWeekData(member, weekOffset) {
+  // Find Monday of target week
+  var now = new Date();
+  var day = now.getDay() || 7; // make Sunday = 7
+  var monday = new Date(now);
+  monday.setDate(now.getDate() - day + 1 + weekOffset * 7);
+  monday.setHours(0,0,0,0);
+
+  var days = [];
+  var weekDayNames = ['一','二','三','四','五','六','日'];
+  for (var i = 0; i < 7; i++) {
+    var d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    var dateStr = d.toISOString().slice(0,10);
+    var dayData = localData[dateStr] || {};
+    var carb = 0, pro = 0, fat = 0;
+    Object.keys(dayData).forEach(function(mealId) {
+      var meal = dayData[mealId];
+      if (!meal) return;
+      // Handle both new format (dishes[]) and old format (items[])
+      if (meal.dishes && meal.dishes.length) {
+        meal.dishes.forEach(function(dish) {
+          (dish.items || []).forEach(function(it) {
+            carb += parseFloat(it.carb) || 0;
+            pro  += parseFloat(it.pro)  || 0;
+            fat  += parseFloat(it.fat)  || 0;
+          });
+        });
+      } else if (meal.items && meal.items.length) {
+        meal.items.forEach(function(it) {
+          carb += parseFloat(it.carb) || 0;
+          pro  += parseFloat(it.pro)  || 0;
+          fat  += parseFloat(it.fat)  || 0;
+        });
+      } else {
+        // Fallback: use saved totals
+        carb += parseFloat(meal.carb) || 0;
+        pro  += parseFloat(meal.pro)  || 0;
+        fat  += parseFloat(meal.fat)  || 0;
+      }
+    });
+    days.push({
+      label: (d.getMonth()+1) + '/' + d.getDate() + ' (' + weekDayNames[i] + ')',
+      carb: Math.round(carb), pro: Math.round(pro), fat: Math.round(fat)
+    });
+  }
+
+  var sunday = new Date(monday); sunday.setDate(monday.getDate() + 6);
+  var fmt = function(d) { return (d.getMonth()+1) + '/' + d.getDate(); };
+  return {
+    label: fmt(monday) + ' – ' + fmt(sunday),
+    days: days
+  };
+}
+
+function renderWeeklySvgChart(weekData) {
+  var days = weekData.days;
+  var BAR_W = 220; // max bar width in SVG units
+  var ROW_H = 36;
+  var LABEL_W = 72;
+  var TOTAL_W = 44;
+  var SVG_W = LABEL_W + BAR_W + TOTAL_W;
+  var SVG_H = days.length * ROW_H + 4;
+
+  // Find max total to scale bars
+  var maxTotal = 1;
+  days.forEach(function(d) {
+    var t = d.carb + d.pro + d.fat;
+    if (t > maxTotal) maxTotal = t;
+  });
+
+  var rows = days.map(function(d, i) {
+    var y = i * ROW_H + 2;
+    var total = d.carb + d.pro + d.fat;
+    var scale = BAR_W / maxTotal;
+    var wCarb = Math.round(d.carb * scale);
+    var wPro  = Math.round(d.pro  * scale);
+    var wFat  = Math.round(d.fat  * scale);
+    var xPro  = LABEL_W + wCarb;
+    var xFat  = xPro + wPro;
+    var barH = 18;
+    var barY = y + (ROW_H - barH) / 2;
+    var totalStr = total > 0 ? total + 'g' : '–';
+    return [
+      '<text x="' + (LABEL_W - 6) + '" y="' + (barY + 13) + '" text-anchor="end" font-size="11" fill="#9A9890">' + d.label + '</text>',
+      total > 0 ? [
+        '<rect x="' + LABEL_W + '" y="' + barY + '" width="' + wCarb + '" height="' + barH + '" rx="3" fill="#D85A30"/>',
+        '<rect x="' + xPro  + '" y="' + barY + '" width="' + wPro  + '" height="' + barH + '" rx="0" fill="#1D9E75"/>',
+        '<rect x="' + xFat  + '" y="' + barY + '" width="' + wFat  + '" height="' + barH + '" rx="0" fill="#BA7517"/>',
+      ].join('') : '<rect x="' + LABEL_W + '" y="' + (barY+7) + '" width="' + BAR_W + '" height="4" rx="2" fill="#E0DED6"/>',
+      '<text x="' + (LABEL_W + BAR_W + 4) + '" y="' + (barY + 13) + '" font-size="11" fill="#5F5E5A">' + totalStr + '</text>'
+    ].join('');
+  });
+
+  return '<svg viewBox="0 0 ' + SVG_W + ' ' + SVG_H + '" xmlns="http://www.w3.org/2000/svg">'
+    + rows.join('')
+    + '</svg>';
+}
 </script>
 
 <script src="https://accounts.google.com/gsi/client" async defer onload="if(typeof initGoogle==='function')initGoogle()"></script>
