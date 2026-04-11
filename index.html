@@ -303,6 +303,22 @@ button:active,
 }
 .btn-ai:not(:disabled):active { background:var(--green); color:#fff; transform:scale(0.98); }
 .btn-ai.loading { background:var(--gray-100); color:var(--gray-400); cursor:wait; }
+.hint-mic-btn {
+  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
+  background: #fff; border: 1.5px solid var(--gray-200);
+  font-size: 16px; cursor: pointer; font-family: inherit;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0;
+}
+.hint-mic-btn:active { transform: scale(0.92); background: var(--gray-100); }
+.hint-mic-btn.listening {
+  background: #FEE2E2; border-color: #FCA5A5;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.5); }
+  50%      { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+}
 
 /* Add dish button */
 .add-dish-btn {
@@ -1452,9 +1468,76 @@ function removePhoto(mealId, dishIdx, e) {
   const k = dateKey();
   localData[k][mealId] = meal;
   localStorage.setItem('mealData', JSON.stringify(localData));
-  const aiBtn = document.getElementById(did + '-ai-btn');
-  if (aiBtn) aiBtn.disabled = true;
+  // Re-evaluate the AI button — it should still be enabled if there's hint text.
+  onHintInput(mealId, dishIdx);
   updateBadge(mealId); setSyncPending();
+}
+
+// Called from hint input oninput — re-enables the AI button once the user
+// has typed something, even if there's no photo.
+function onHintInput(mealId, dishIdx) {
+  const did = mealId + '-dish-' + dishIdx;
+  const hintEl = document.getElementById(did + '-hint');
+  const btn = document.getElementById(did + '-ai-btn');
+  if (!hintEl || !btn) return;
+  const meal = getMeal(mealId);
+  const dish = meal && meal.dishes && meal.dishes[dishIdx];
+  const hasPhoto = !!(dish && dish.photo);
+  const hasText = hintEl.value.trim().length > 0;
+  btn.disabled = !(hasPhoto || hasText);
+}
+
+// Voice input via Web Speech API (zh-TW). Populates the hint field so the
+// user can review before tapping the AI button. No cost — browser-native.
+var _voiceRecognizer = null;
+function startVoiceHint(did) {
+  const hintEl = document.getElementById(did + '-hint');
+  const micBtn = document.getElementById(did + '-mic');
+  if (!hintEl) return;
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { toast('此瀏覽器不支援語音輸入'); return; }
+  // Stop any previous session first.
+  if (_voiceRecognizer) {
+    try { _voiceRecognizer.stop(); } catch (_) {}
+    _voiceRecognizer = null;
+  }
+  const rec = new SR();
+  rec.lang = 'zh-TW';
+  rec.continuous = false;
+  rec.interimResults = false;
+  rec.maxAlternatives = 1;
+  _voiceRecognizer = rec;
+  if (micBtn) micBtn.classList.add('listening');
+  rec.onresult = function(ev) {
+    const text = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) || '';
+    if (text) {
+      // Append to existing hint instead of overwriting so users can combine
+      // a typed snippet with a spoken addition.
+      const current = hintEl.value.trim();
+      hintEl.value = current ? (current + '、' + text) : text;
+      // Trigger the oninput handler manually to re-enable the AI button.
+      const mealId = did.split('-dish-')[0];
+      const dishIdx = parseInt(did.split('-dish-')[1], 10);
+      onHintInput(mealId, dishIdx);
+      toast('語音輸入：' + text);
+    }
+  };
+  rec.onerror = function(ev) {
+    if (micBtn) micBtn.classList.remove('listening');
+    const code = ev && ev.error;
+    if (code === 'no-speech')       toast('沒有聽到聲音');
+    else if (code === 'not-allowed') toast('請授權麥克風權限');
+    else                             toast('語音輸入失敗：' + (code || 'unknown'));
+  };
+  rec.onend = function() {
+    if (micBtn) micBtn.classList.remove('listening');
+    _voiceRecognizer = null;
+  };
+  try { rec.start(); }
+  catch (e) {
+    if (micBtn) micBtn.classList.remove('listening');
+    toast('語音輸入啟動失敗');
+  }
 }
 
 // ─── GEMINI FOOD RECOGNITION ─────────────────────────────────────
@@ -1469,9 +1552,15 @@ async function recognizeFood(mealId, dishIdx) {
   }
   const meal = getMeal(mealId);
   const dish = meal.dishes[dishIdx];
-  if (!dish || !dish.photo) { toast('請先拍照'); return; }
-
   const did = mealId + '-dish-' + dishIdx;
+  const hintEl = document.getElementById(did + '-hint');
+  const hint = hintEl ? hintEl.value.trim() : '';
+  const hasPhoto = !!(dish && dish.photo);
+  if (!hasPhoto && !hint) {
+    toast('請先拍照或輸入食物描述');
+    return;
+  }
+
   const btn = document.getElementById(did + '-ai-btn');
   if (!btn) return;
   const originalText = btn.textContent;
@@ -1480,20 +1569,40 @@ async function recognizeFood(mealId, dishIdx) {
   btn.textContent = '✨ AI 分析中...';
 
   try {
-    const base64 = dish.photo.split(',')[1];
-    const mimeType = (dish.photo.split(';')[0].split(':')[1]) || 'image/jpeg';
-
-    const hintEl = document.getElementById(did + '-hint');
-    const hint = hintEl ? hintEl.value.trim() : '';
-    const hintLine = hint ? '\n【使用者提示】圖中包含：' + hint + '。請優先以此為準估算數量，再參考照片確認。' : '';
-
+    // Build parts depending on whether we have a photo. Text-only calls
+    // skip the inline_data block and use a different instruction set
+    // that leans on the textual description instead of "what the photo shows".
+    const parts = [];
+    if (hasPhoto) {
+      const hintLine = hint ? '\n【使用者提示】圖中包含：' + hint + '。請優先以此為準估算數量，再參考照片確認。' : '';
+      parts.push({ text:
+        '請分析這張圖片，分兩種情況處理：\n'
+        + '1. 如果是「營養成分表／標示」：直接讀取碳水化合物、蛋白質、脂肪的數值（克），以產品名稱作為食物名稱，只回傳一筆項目，礦物質維生素等一律忽略。\n'
+        + '2. 如果是「食物照片」：請先仔細觀察圖中**每種食物的實際可見數量**（數出件數、估計體積），再計算三大營養素。\n'
+        + '【重要】不要套用「標準份量」，要根據照片裡看到的實際量。例如：只看到 8 顆杏仁就以 8 顆計算（≈4g 脂肪），只看到 3 片酪梨就以 3 片計算（≈4g 脂肪）。寧可保守低估，不要高估。回傳整數克數。'
+        + hintLine
+        + '\n請根據圖片內容自動判斷是哪種情況並回傳。'
+      });
+      const base64 = dish.photo.split(',')[1];
+      const mimeType = (dish.photo.split(';')[0].split(':')[1]) || 'image/jpeg';
+      parts.push({ inline_data: { mime_type: mimeType, data: base64 } });
+    } else {
+      // Text-only mode — user typed or spoke their food.
+      parts.push({ text:
+        '請根據下面的文字描述估算這些食物的三大營養素（碳水化合物、蛋白質、脂肪，單位為克）。\n'
+        + '【食物描述】' + hint + '\n\n'
+        + '規則：\n'
+        + '1. 以描述中明確提到的份量、件數、重量為準，不要自行加量。\n'
+        + '2. 若份量不明，採用台灣常見小份量（例如「一碗白飯」≈ 200g 白飯）。\n'
+        + '3. 使用台灣飲食常見的營養素估值（例如滷肉飯、蚵仔麵線、割包等台灣小吃要用台灣實際食材估算）。\n'
+        + '4. 寧可保守低估，不要高估。\n'
+        + '5. 回傳整數克數。\n'
+        + '6. 把描述拆成多個食物項目分別回傳。\n'
+        + '7. 食物名稱用繁體中文。'
+      });
+    }
     const body = {
-      contents: [{
-        parts: [
-          { text: '請分析這張圖片，分兩種情況處理：\n1. 如果是「營養成分表／標示」：直接讀取碳水化合物、蛋白質、脂肪的數值（克），以產品名稱作為食物名稱，只回傳一筆項目，礦物質維生素等一律忽略。\n2. 如果是「食物照片」：請先仔細觀察圖中**每種食物的實際可見數量**（數出件數、估計體積），再計算三大營養素。\n【重要】不要套用「標準份量」，要根據照片裡看到的實際量。例如：只看到 8 顆杏仁就以 8 顆計算（≈4g 脂肪），只看到 3 片酪梨就以 3 片計算（≈4g 脂肪）。寧可保守低估，不要高估。回傳整數克數。' + hintLine + '\n請根據圖片內容自動判斷是哪種情況並回傳。' },
-          { inline_data: { mime_type: mimeType, data: base64 } }
-        ]
-      }],
+      contents: [{ parts: parts }],
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: {
@@ -1808,7 +1917,15 @@ function renderDishCard(mealId, dishIdx, dish, totalDishes) {
     ? '<button class="dish-del-btn" onclick="removeDish(\'' + mealId + '\',' + dishIdx + ')">移除這道</button>'
     : '';
   const imgTag = dish.photo ? '<img src="' + dish.photo + '">' : '';
+  // AI button is enabled whenever either (a) a photo exists, or (b) the hint
+  // field has any text. The button is disabled by default and re-enabled
+  // from oninput on the hint field.
   const aiDisabled = dish.photo ? '' : 'disabled';
+  const micSupported = (typeof window !== 'undefined')
+    && (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const micBtn = micSupported
+    ? '<button class="hint-mic-btn" id="' + did + '-mic" onclick="startVoiceHint(\'' + did + '\')" title="語音輸入">🎤</button>'
+    : '';
   return '<div class="dish-card" id="' + did + '">'
     + '<div class="dish-header">'
     + '<span class="dish-label">第 ' + (dishIdx + 1) + ' 道菜</span>'
@@ -1822,13 +1939,15 @@ function renderDishCard(mealId, dishIdx, dish, totalDishes) {
     + '</div>'
     + '<input type="file" accept="image/*" style="display:none" id="' + did + '-file"'
     + ' onchange="handlePhoto(\'' + mealId + '\',' + dishIdx + ',this)">'
-    + '<div style="padding:10px 14px 4px;">'
-    + '<input type="text" id="' + did + '-hint" placeholder="食材提示（選填）例：10顆杏仁、半顆酪梨"'
-    + ' style="width:100%;box-sizing:border-box;padding:8px 10px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-600);font-family:inherit;">'
+    + '<div class="hint-row" style="padding:10px 14px 4px;display:flex;gap:6px;align-items:center;">'
+    + '<input type="text" id="' + did + '-hint" placeholder="文字描述食物（例：滷肉飯一碗、兩顆蛋）"'
+    + ' oninput="onHintInput(\'' + mealId + '\',' + dishIdx + ')"'
+    + ' style="flex:1;min-width:0;box-sizing:border-box;padding:8px 10px;border:1.5px solid var(--gray-200);border-radius:var(--radius-sm);font-size:13px;color:var(--gray-900);font-family:inherit;">'
+    + micBtn
     + '</div>'
     + '<div style="padding:4px 14px 0;">'
     + '<button class="btn-ai" id="' + did + '-ai-btn"'
-    + ' onclick="recognizeFood(\'' + mealId + '\',' + dishIdx + ')" ' + aiDisabled + '>✨ 用 AI 識別食物</button>'
+    + ' onclick="recognizeFood(\'' + mealId + '\',' + dishIdx + ')" ' + aiDisabled + '>✨ 用 AI 估算</button>'
     + '</div>'
     + '<div id="' + did + '-items" style="padding:10px 14px 0;display:flex;flex-direction:column;gap:8px;">'
     + renderFoodItems(mealId, dishIdx, dish.items)
