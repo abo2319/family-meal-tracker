@@ -1,5 +1,5 @@
 // Bump this on every deploy so installed PWAs pick up fresh HTML/JS.
-const VERSION = 'v4-2026-04-11';
+const VERSION = 'v6-2026-04-11-shared';
 const CACHE = 'meal-tracker-' + VERSION;
 
 const ASSETS = [

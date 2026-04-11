@@ -497,8 +497,24 @@ function promptForGeminiKey() {
   toast('Gemini API Key 已儲存 ✓');
   return true;
 }
-const SCOPES = 'openid profile email https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
+// Full Drive scope is required because the shared meal_data.json lives in
+// shunyu1123's Drive and was not created by other family members' app
+// instances — drive.file would 404 on such files even when shared.
+const SCOPES = 'openid profile email https://www.googleapis.com/auth/drive';
 const FOLDER_NAME = 'FamilyMealTracker';
+// File ID of the shared meal_data.json in shunyu1123@gmail.com's Drive.
+// Shared with editor permission to the whole family. When set, all accounts
+// read/write this one file instead of each having their own per-Drive copy.
+// Empty string = legacy per-account mode (safe fallback for dev).
+const SHARED_DATA_FILE_ID = '1J8s5sButIpK8kcfYAD63AzEVWWtzqiI5';
+// Bump when SCOPES changes so old cached tokens (which lacked the new scope)
+// are dropped and users are forced through a fresh consent flow.
+const AUTH_VERSION = 'v2-shared-drive';
+if (localStorage.getItem('authVersion') !== AUTH_VERSION) {
+  localStorage.removeItem('accessToken');
+  localStorage.removeItem('tokenExpiry');
+  localStorage.setItem('authVersion', AUTH_VERSION);
+}
 
 // ─── STATE ───────────────────────────────────────────────────────
 let tokenClient, accessToken = null;
@@ -534,6 +550,34 @@ if (localData == null || typeof localData !== 'object' || Array.isArray(localDat
 }
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
+
+// ─── ACCESS CONTROL ──────────────────────────────────────────────
+// Maps Google account email → default member, so each family member is
+// auto-tagged after login and never has to pick their own chip first.
+const EMAIL_TO_MEMBER = {
+  's460585@gmail.com':    'Ning',
+  'ytning4@gmail.com':    'Dean',
+  'shunyu1123@gmail.com': 'Dean',
+  'imjb110257@gmail.com': 'Angela',
+  'max3359998@gmail.com': 'Poppy'
+};
+// Only these accounts can see Ning's stats page. Everyone else has the
+// "Ning" chip filtered out of the stats view.
+const NING_VIEWERS = ['s460585@gmail.com','ytning4@gmail.com','shunyu1123@gmail.com'];
+
+function currentEmail() {
+  return (userInfo && userInfo.email) ? String(userInfo.email).toLowerCase() : '';
+}
+function canViewNingStats() {
+  if (IS_DEV) return true;
+  return NING_VIEWERS.indexOf(currentEmail()) !== -1;
+}
+function applyEmailRouting() {
+  const target = EMAIL_TO_MEMBER[currentEmail()];
+  if (target && members.indexOf(target) !== -1) {
+    currentMember = target;
+  }
+}
 
 const MEALS_DEF = [
   { id:'breakfast', name:'早餐', time:'07:00 – 09:00', icon:'🍳', bg:'#FFF8F0' },
@@ -627,6 +671,9 @@ function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').classList.add('visible');
   ensureValidMember();
+  // Auto-tag the logged-in user (e.g. ytning4@gmail.com → Dean) so they
+  // can start typing food immediately without picking their own chip.
+  applyEmailRouting();
   renderAvatar();
   renderMembers();
   render();
@@ -1438,27 +1485,100 @@ async function uploadPhoto(folderId, filename, dataUrl) {
   });
 }
 
+// Per-meal merge: remote and local both have a member::date::mealId entry.
+// Rule: whichever side has MORE dishes wins. This is good enough for the
+// family-sync case where different members edit different dates/meals — real
+// conflicts are extremely rare. Caveat: a delete that drops dishCount from
+// N→0 will be reverted by a stale local copy; users can work around by
+// editing the dish to blank instead of deleting.
+function mergeRemoteIntoLocal(remote) {
+  if (!remote || typeof remote !== 'object') return localData;
+  const result = {};
+  Object.keys(localData).forEach(function(k) { result[k] = localData[k]; });
+  Object.keys(remote).forEach(function(k) {
+    if (!result[k]) { result[k] = remote[k]; return; }
+    // Both sides have this date-key — merge meal by meal.
+    const merged = {};
+    Object.keys(result[k]).forEach(function(mealId) { merged[mealId] = result[k][mealId]; });
+    Object.keys(remote[k] || {}).forEach(function(mealId) {
+      const localM = merged[mealId];
+      const remoteM = remote[k][mealId];
+      if (!localM) { merged[mealId] = remoteM; return; }
+      const localHas  = typeof hasMealData === 'function' ? hasMealData(localM)  : true;
+      const remoteHas = typeof hasMealData === 'function' ? hasMealData(remoteM) : true;
+      if (!localHas)  { merged[mealId] = remoteM; return; }
+      if (!remoteHas) return; // keep local
+      const localCount  = ((localM  && localM.dishes)  || []).length;
+      const remoteCount = ((remoteM && remoteM.dishes) || []).length;
+      if (remoteCount > localCount) merged[mealId] = remoteM;
+    });
+    result[k] = merged;
+  });
+  return result;
+}
+
+async function fetchSharedFile() {
+  const r = await fetch(
+    'https://www.googleapis.com/drive/v3/files/' + SHARED_DATA_FILE_ID + '?alt=media',
+    { headers: { Authorization: 'Bearer ' + accessToken } }
+  );
+  if (!r.ok) {
+    if (r.status === 401 || r.status === 403) {
+      toast('需要重新登入以取得家庭共享資料夾權限');
+      signOut();
+      return null;
+    }
+    throw new Error('Drive fetch failed: ' + r.status);
+  }
+  return await r.json();
+}
+
 async function loadFromDrive() {
   if (!accessToken) return;
   try {
-    const fid = await ensureFolder();
-    const search = await fetch(
-      'https://www.googleapis.com/drive/v3/files?q=name=\'meal_data.json\' and \'' + fid + '\' in parents and trashed=false&fields=files(id)',
-      { headers: { Authorization: 'Bearer ' + accessToken } }
-    );
-    const sd = await search.json();
-    if (sd.files && sd.files.length > 0) {
+    let driveData = null;
+    if (SHARED_DATA_FILE_ID) {
+      // Shared mode — read the family file directly by ID.
+      driveData = await fetchSharedFile();
+      if (driveData === null) return; // signOut was called, bail
+    } else {
+      // Legacy per-user mode — search the user's own FamilyMealTracker folder.
+      const fid = await ensureFolder();
+      const search = await fetch(
+        'https://www.googleapis.com/drive/v3/files?q=name=\'meal_data.json\' and \'' + fid + '\' in parents and trashed=false&fields=files(id)',
+        { headers: { Authorization: 'Bearer ' + accessToken } }
+      );
+      const sd = await search.json();
+      if (!sd.files || sd.files.length === 0) return;
       const fileId = sd.files[0].id;
       const r = await fetch('https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media', {
         headers: { Authorization: 'Bearer ' + accessToken }
       });
-      const driveData = await r.json();
-      localData = Object.assign({}, driveData, localData);
-      localStorage.setItem('mealData', JSON.stringify(localData));
+      driveData = await r.json();
+    }
+    if (driveData && typeof driveData === 'object' && !Array.isArray(driveData)) {
+      localData = mergeRemoteIntoLocal(driveData);
+      try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
       render();
       setSyncOK('已從 Drive 載入資料');
     }
   } catch(e) { console.warn('Drive load:', e); }
+}
+
+function stripPhotosForUpload(data) {
+  const noPhoto = {};
+  Object.keys(data || {}).forEach(function(k) {
+    noPhoto[k] = {};
+    Object.keys(data[k] || {}).forEach(function(mealId) {
+      const m = data[k][mealId];
+      noPhoto[k][mealId] = Object.assign({}, m, {
+        dishes: ((m && m.dishes) || []).map(function(d) {
+          return Object.assign({}, d, { photo: '' });
+        })
+      });
+    });
+  });
+  return noPhoto;
 }
 
 async function syncToDrive() {
@@ -1467,22 +1587,43 @@ async function syncToDrive() {
   setSyncPending();
   toast('同步中...');
   try {
-    const fid = await ensureFolder();
-    const noPhoto = {};
-    Object.keys(localData).forEach(function(k) {
-      noPhoto[k] = {};
-      Object.keys(localData[k]).forEach(function(mealId) {
-        const m = localData[k][mealId];
-        noPhoto[k][mealId] = Object.assign({}, m, {
-          dishes: (m.dishes || []).map(function(d) { return Object.assign({}, d, { photo: '' }); })
-        });
-      });
-    });
-    await uploadJSON(fid, 'meal_data.json', noPhoto);
+    if (SHARED_DATA_FILE_ID) {
+      // 1) Re-read remote so we don't clobber another family member's recent edit.
+      try {
+        const remote = await fetchSharedFile();
+        if (remote === null) return; // signOut was called
+        if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
+          localData = mergeRemoteIntoLocal(remote);
+          try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+        }
+      } catch(e) { console.warn('Pre-sync merge failed, continuing:', e); }
+
+      // 2) Build photo-stripped payload from the merged localData.
+      const payload = stripPhotosForUpload(localData);
+
+      // 3) PATCH the shared file by ID (overwrite with merged content).
+      const res = await fetch(
+        'https://www.googleapis.com/upload/drive/v3/files/' + SHARED_DATA_FILE_ID + '?uploadType=media',
+        {
+          method: 'PATCH',
+          headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload, null, 2)
+        }
+      );
+      if (!res.ok) throw new Error('Shared sync failed: ' + res.status + ' ' + await res.text());
+      render();
+    } else {
+      // Legacy per-user mode
+      const fid = await ensureFolder();
+      const payload = stripPhotosForUpload(localData);
+      await uploadJSON(fid, 'meal_data.json', payload);
+    }
+
     const now = new Date().toLocaleTimeString('zh-TW', { hour:'2-digit', minute:'2-digit' });
     setSyncOK('已同步 ' + now);
     toast('同步完成！');
   } catch(e) {
+    console.warn('Sync error:', e);
     setSyncErr('同步失敗');
     toast('同步失敗，請重試');
   }
@@ -1541,6 +1682,11 @@ function showStats() {
   // Save any unsaved record-view typing before hiding it.
   harvestVisibleDishes();
   statsMember = currentMember || (members[0] || '');
+  // Ning's stats are private — if the current account isn't authorized,
+  // jump to the first non-Ning member instead.
+  if (statsMember === 'Ning' && !canViewNingStats()) {
+    statsMember = members.find(function(m){ return m !== 'Ning'; }) || '';
+  }
   statsWeekOffset = 0;
   document.querySelector('.date-nav').style.display = 'none';
   document.querySelector('.summary-row').style.display = 'none';
@@ -1562,13 +1708,22 @@ function renderStatsView() {
   // Member chips — use DOM construction with index-based handler to avoid
   // injecting the (potentially user-controlled, drive-synced) member name
   // into an onclick attribute or HTML text.
+  // Hide Ning entirely if the current account isn't authorized to see it.
+  var visibleMembers = members.filter(function(m) {
+    return m !== 'Ning' || canViewNingStats();
+  });
+  // If the active stats member just got filtered out, fall back to the first
+  // visible one so the chart isn't blank.
+  if (visibleMembers.indexOf(statsMember) === -1) {
+    statsMember = visibleMembers[0] || '';
+  }
   var strip = document.getElementById('stats-member-strip');
   strip.innerHTML = '';
-  members.forEach(function(m, idx) {
+  visibleMembers.forEach(function(m, idx) {
     var chip = document.createElement('span');
     chip.className = 'm-chip' + (m === statsMember ? ' active' : '');
     chip.textContent = m;
-    chip.onclick = function() { statsSelectMember(members[idx]); };
+    chip.onclick = function() { statsSelectMember(visibleMembers[idx]); };
     strip.appendChild(chip);
   });
 
