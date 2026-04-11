@@ -576,6 +576,39 @@ select.profile-field-input {
 .insight-item.warn .dot { color: #EA580C; }
 .insight-item.bad .dot  { color: #DC2626; }
 .insight-empty { font-size: 12px; color: var(--gray-400); }
+
+/* B2: Gemini weekly coach card */
+.coach-card {
+  margin: 0 16px 14px; background: linear-gradient(135deg, #FEF6EC 0%, #FEF3E2 100%);
+  border: 1px solid #F5D9A5; border-radius: var(--radius);
+  padding: 14px 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+.coach-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.coach-title { font-size: 14px; font-weight: 700; color: #92400E; }
+.coach-btn {
+  background: #fff; border: 1px solid #F5D9A5; color: #92400E;
+  border-radius: 99px; padding: 5px 12px; font-size: 12px; font-weight: 600;
+  cursor: pointer; font-family: inherit;
+}
+.coach-btn:active { background: #FEF3C7; transform: scale(0.96); }
+.coach-btn:disabled { opacity: 0.5; cursor: wait; }
+.coach-section { margin-top: 10px; }
+.coach-section-label { font-size: 12px; font-weight: 700; color: #92400E; margin-bottom: 4px; }
+.coach-section-body { font-size: 13px; color: #5F5E5A; line-height: 1.6; white-space: pre-wrap; }
+.coach-sug-list { margin-top: 4px; padding-left: 2px; }
+.coach-sug-item {
+  font-size: 13px; color: #5F5E5A; line-height: 1.5;
+  margin-bottom: 5px; padding-left: 14px; position: relative;
+}
+.coach-sug-item::before {
+  content: '🥢'; position: absolute; left: -2px; top: 0; font-size: 12px;
+}
+.coach-sug-name { font-weight: 600; color: #92400E; }
+.coach-empty { font-size: 12px; color: #92400E; opacity: 0.7; text-align: center; padding: 8px 0; }
+.coach-timestamp { font-size: 10px; color: var(--gray-400); margin-top: 8px; text-align: right; }
 .stats-header {
   display: flex; align-items: center; gap: 10px;
   padding: 14px 16px 10px;
@@ -733,6 +766,7 @@ select.profile-field-input {
       <div class="stats-week-arrow" onclick="statsChangeWeek(1)">›</div>
     </div>
     <div class="insight-card" id="stats-insight-card" style="display:none;"></div>
+    <div class="coach-card" id="stats-coach-card" style="display:none;"></div>
     <div class="stats-chart-wrap">
       <div id="stats-chart"></div>
     </div>
@@ -3085,6 +3119,9 @@ function renderStatsView() {
 
   // M2: weekly rule-based insight card (renders between week nav and chart)
   renderInsightCard(weekData);
+  // B2: Gemini weekly coach card (shows cached report if present, or a
+  // "產生本週報告" button that calls Gemini once per week).
+  renderCoachCard(weekData);
 
   // Pick a default selected day for the detail section:
   //   1. Today (if today is in this week)
@@ -3227,6 +3264,169 @@ function buildInsights(weekData, tdeeInfo) {
   }
 
   return out.slice(0, 4);
+}
+
+// ─── B2: Gemini weekly coach ─────────────────────────────────────
+function coachCacheKey(member, weekData) {
+  // Use the first day of the week (Monday) as the cache key so swapping
+  // between adjacent days in the same week reuses the same report.
+  var first = weekData && weekData.days && weekData.days[0];
+  var weekKey = first ? first.dateStr : new Date().toISOString().slice(0,10);
+  return 'coach::' + member + '::' + weekKey;
+}
+
+function renderCoachCard(weekData) {
+  var card = document.getElementById('stats-coach-card');
+  if (!card) return;
+  var loggedDays = (weekData.days || []).filter(function(d) { return d.kcal > 0; }).length;
+  if (loggedDays === 0) { card.style.display = 'none'; return; }
+  card.style.display = '';
+
+  var cacheKey = coachCacheKey(statsMember, weekData);
+  var cached = safeParse(cacheKey, null, 'AI 週報');
+  if (cached && cached.good) {
+    card.innerHTML = buildCoachHtml(cached, true);
+  } else {
+    card.innerHTML = '<div class="coach-head">'
+      + '<span class="coach-title">✨ AI 週報教練</span>'
+      + '<button class="coach-btn" onclick="generateCoachReport()">產生本週報告</button>'
+      + '</div>'
+      + '<div class="coach-empty">讓 Gemini 幫你分析這週吃得怎麼樣，並建議下週菜單</div>';
+  }
+}
+
+function buildCoachHtml(report, fromCache) {
+  var when = report.generatedAt
+    ? new Date(report.generatedAt).toLocaleString('zh-TW', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })
+    : '';
+  var sugList = (report.suggestions || []).map(function(s) {
+    return '<div class="coach-sug-item"><span class="coach-sug-name">' + escAttr(s.name || '') + '</span>'
+      + (s.reason ? '　' + escAttr(s.reason) : '') + '</div>';
+  }).join('');
+  return '<div class="coach-head">'
+    + '<span class="coach-title">✨ AI 週報教練</span>'
+    + '<button class="coach-btn" onclick="generateCoachReport(true)">↻ 重新產生</button>'
+    + '</div>'
+    + (report.good ? '<div class="coach-section"><div class="coach-section-label">👍 做得好的地方</div><div class="coach-section-body">' + escAttr(report.good) + '</div></div>' : '')
+    + (report.improve ? '<div class="coach-section"><div class="coach-section-label">💡 可以改進的地方</div><div class="coach-section-body">' + escAttr(report.improve) + '</div></div>' : '')
+    + (sugList ? '<div class="coach-section"><div class="coach-section-label">🍽️ 下週建議菜單</div><div class="coach-sug-list">' + sugList + '</div></div>' : '')
+    + (when ? '<div class="coach-timestamp">產生於 ' + when + (fromCache ? '（本週快取）' : '') + '</div>' : '');
+}
+
+async function generateCoachReport(forceFresh) {
+  var key = getGeminiKey();
+  if (!key) {
+    var ok = promptForGeminiKey();
+    if (!ok) return;
+    key = getGeminiKey();
+    if (!key) return;
+  }
+  var weekData = buildWeekData(statsMember, statsWeekOffset);
+  var cacheKey = coachCacheKey(statsMember, weekData);
+  if (!forceFresh) {
+    var existing = safeParse(cacheKey, null, 'AI 週報');
+    if (existing && existing.good) {
+      renderCoachCard(weekData);
+      return;
+    }
+  }
+  var card = document.getElementById('stats-coach-card');
+  if (card) {
+    card.innerHTML = '<div class="coach-head"><span class="coach-title">✨ AI 週報教練</span>'
+      + '<button class="coach-btn" disabled>分析中...</button></div>'
+      + '<div class="coach-empty">Gemini 正在閱讀你這週的飲食記錄...</div>';
+  }
+
+  // Build a compact textual summary of the week for the prompt
+  var lines = [];
+  (weekData.days || []).forEach(function(d) {
+    var dayKey = statsMember + '::' + d.dateStr;
+    var dayData = localData[dayKey] || {};
+    var mealLines = [];
+    MEALS_DEF.forEach(function(def) {
+      var meal = dayData[def.id];
+      if (!meal || !hasMealData(meal)) return;
+      var names = collectMealItemNames(meal);
+      var kcal = mealKcal(meal);
+      mealLines.push('  ' + def.name + '（' + kcal + '大卡）：' + (names.length ? names.join('、') : '—'));
+    });
+    if (mealLines.length > 0) {
+      lines.push(d.label + '  [' + d.kcal + ' 大卡  碳' + d.carb + 'g 蛋' + d.pro + 'g 脂' + d.fat + 'g]');
+      lines.push(mealLines.join('\n'));
+    } else {
+      lines.push(d.label + '  (未記錄)');
+    }
+  });
+  var weekSummary = lines.join('\n');
+
+  var profile = localProfiles[statsMember]
+             || safeParse('profile::' + statsMember, {}, '個人資料')
+             || {};
+  var tdeeInfo = computeTdee(profile);
+  var profileLine = '';
+  if (profile.height && profile.weight) {
+    profileLine = '成員資料：' + statsMember
+      + '，' + profile.height + 'cm，' + profile.weight + 'kg'
+      + (profile.gender === 'male' ? '，男性' : (profile.gender === 'female' ? '，女性' : ''))
+      + (tdeeInfo ? '，每日建議熱量 ' + tdeeInfo.tdee + ' 大卡' : '');
+  }
+
+  var prompt = '你是一位友善、溫和、說話像家人的台灣營養師。\n\n'
+    + profileLine + '\n\n'
+    + '以下是最近一週的飲食記錄：\n\n' + weekSummary + '\n\n'
+    + '請以繁體中文輸出一份簡短報告，分三個部分：\n'
+    + '1. good：「做得好的地方」— 2-3 句，具體指出這週飲食裡值得肯定的點。\n'
+    + '2. improve：「可以改進的地方」— 2-3 句，用溫和語氣提醒，不要批判。避免使用「過量」「超標」等嚇人字眼，改用「稍微多了一點」「可以再少一點」。\n'
+    + '3. suggestions：「下週建議菜單」— 列出 3 道台灣家常料理，每道包含 name（菜名，例：蒸蛋豆腐）和 reason（為什麼推薦，1 句話，說明對這位成員的好處）。\n\n'
+    + '讀者是台灣家庭的長輩，語氣要像孫子跟阿嬤講話那樣親切，不要像醫生下指令。';
+
+  var body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'OBJECT',
+        properties: {
+          good:    { type: 'STRING' },
+          improve: { type: 'STRING' },
+          suggestions: {
+            type: 'ARRAY',
+            items: {
+              type: 'OBJECT',
+              properties: { name: { type: 'STRING' }, reason: { type: 'STRING' } },
+              required: ['name', 'reason']
+            }
+          }
+        },
+        required: ['good', 'improve', 'suggestions']
+      }
+    }
+  };
+
+  try {
+    var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL
+      + ':generateContent?key=' + encodeURIComponent(key);
+    var res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) throw new Error('API ' + res.status + ': ' + (await res.text()).slice(0, 200));
+    var data = await res.json();
+    var txt = data && data.candidates && data.candidates[0] && data.candidates[0].content
+      && data.candidates[0].content.parts && data.candidates[0].content.parts[0]
+      && data.candidates[0].content.parts[0].text;
+    if (!txt) throw new Error('Gemini 回傳空內容');
+    var parsed = JSON.parse(txt);
+    parsed.generatedAt = new Date().toISOString();
+    try { localStorage.setItem(cacheKey, JSON.stringify(parsed)); } catch(_) {}
+    renderCoachCard(weekData);
+    toast('AI 週報已產生 ✓');
+  } catch (e) {
+    console.error('Coach error:', e);
+    toast('週報產生失敗：' + (e.message || e));
+    renderCoachCard(weekData);
+  }
 }
 
 function renderInsightCard(weekData) {
