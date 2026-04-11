@@ -209,6 +209,29 @@ button:active,
 .meal-body { display: none; border-top: 1px solid var(--gray-100); padding-top: 12px; }
 .meal-card.open .meal-body { display: block; }
 
+/* ── Quick-add strip (favorites + copy yesterday) ── */
+.quick-add-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 0 16px 10px; align-items: center;
+}
+.quick-label {
+  font-size: 12px; color: var(--gray-400);
+  font-weight: 500; margin-right: 2px;
+}
+.quick-chip {
+  display: inline-block;
+  background: #fff; border: 1px solid var(--gray-200);
+  border-radius: 99px; padding: 5px 11px;
+  font-size: 12px; color: var(--gray-600);
+  cursor: pointer; font-family: inherit;
+  white-space: nowrap;
+}
+.quick-chip:active { background: var(--gray-100); transform: scale(0.95); }
+.quick-chip.fav-chip { background: #FEF6EC; border-color: #F5D9A5; color: #92400E; }
+.quick-chip.fav-chip:active { background: #FCE8CA; }
+.quick-chip.copy-chip { background: #E1F5EE; border-color: #9BDCC4; color: var(--green-dark); font-weight: 600; }
+.quick-chip.copy-chip:active { background: #B8EFDD; }
+
 /* ── Dish Cards ── */
 .dish-card {
   background: var(--gray-50);
@@ -341,7 +364,14 @@ button:active,
   opacity: 0; transition: opacity 0.25s; pointer-events: none;
   white-space: nowrap; z-index: 200;
 }
-.toast.show { opacity: 1; }
+.toast.show { opacity: 1; pointer-events: auto; }
+.toast-undo {
+  display: inline-block; margin-left: 10px; padding: 2px 10px;
+  border: 1px solid rgba(255,255,255,0.5); border-radius: 99px;
+  font-size: 13px; font-weight: 700; color: #fff;
+  cursor: pointer; -webkit-tap-highlight-color: rgba(255,255,255,0.2);
+}
+.toast-undo:active { background: rgba(255,255,255,0.15); }
 
 /* ── User Menu ── */
 .user-menu {
@@ -800,6 +830,13 @@ let localData = safeParse('mealData', {}, '飲食記錄');
 if (localData == null || typeof localData !== 'object' || Array.isArray(localData)) {
   localData = {};
 }
+// Cross-device profile store. Keyed by member name. Synced with the shared
+// Drive file under a top-level "profiles" key that sits alongside date
+// entries. Mirrored locally so the app still works offline.
+let localProfiles = safeParse('profiles', {}, '個人資料');
+if (!localProfiles || typeof localProfiles !== 'object' || Array.isArray(localProfiles)) {
+  localProfiles = {};
+}
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
 
@@ -1166,10 +1203,25 @@ function harvestVisibleDishes() {
   }
 }
 
+// 1-level undo buffer. Holds the previous meal snapshot after saveMeal() so
+// the user can tap "復原" on the success toast to roll back. Cleared after
+// the toast window expires.
+var _lastSaveSnapshot = null;
+
 function saveMeal(mealId) {
   const k = dateKey();
   if (!localData[k]) localData[k] = {};
   const m = getMeal(mealId);
+
+  // Snapshot the pre-save meal for potential undo (deep clone).
+  const prevMeal = localData[k][mealId];
+  _lastSaveSnapshot = {
+    dateKey: k,
+    mealId: mealId,
+    meal: prevMeal ? JSON.parse(JSON.stringify(prevMeal)) : null,
+    expiresAt: Date.now() + 6000
+  };
+
   // Collect all dish cards from DOM
   const dishCards = document.querySelectorAll('#' + mealId + '-dishes .dish-card');
   const dishes = [];
@@ -1202,6 +1254,38 @@ function saveMeal(mealId) {
     setTimeout(function() { btn.textContent = '儲存這餐'; btn.style.background = ''; }, 1800);
   }
   setSyncPending();
+  showUndoToast();
+}
+
+function showUndoToast() {
+  var t = document.getElementById('toast');
+  if (!t) return;
+  t.innerHTML = '已儲存 ✓  <span class="toast-undo" onclick="undoLastSave()">復原</span>';
+  t.classList.add('show');
+  setTimeout(function() {
+    t.classList.remove('show');
+    // Plain text again after fade; clear the snapshot so late taps don't revert.
+    setTimeout(function() { t.innerHTML = ''; _lastSaveSnapshot = null; }, 300);
+  }, 5500);
+}
+
+function undoLastSave() {
+  var snap = _lastSaveSnapshot;
+  if (!snap || Date.now() > snap.expiresAt) {
+    toast('已超過復原時間');
+    return;
+  }
+  if (snap.meal) {
+    localData[snap.dateKey][snap.mealId] = snap.meal;
+  } else {
+    // Previously there was no meal — delete the one we just saved.
+    if (localData[snap.dateKey]) delete localData[snap.dateKey][snap.mealId];
+  }
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+  _lastSaveSnapshot = null;
+  // Re-render the affected meal card if it's still visible.
+  render();
+  toast('已復原');
 }
 
 function getDishItems(card) {
@@ -1241,6 +1325,15 @@ function removeDish(mealId, dishIdx) {
   harvestVisibleDishes();
   const meal = getMeal(mealId);
   if (meal.dishes.length <= 1) return;
+  // Only prompt for confirmation if the dish actually has data worth protecting.
+  // A completely empty dish (no photo, no items) can be removed silently.
+  const dish = meal.dishes[dishIdx];
+  const hasContent = dish && (dish.photo || (dish.items || []).some(function(it) {
+    return (it.name && it.name.trim()) || it.carb || it.pro || it.fat;
+  }));
+  if (hasContent) {
+    if (!confirm('確定要移除這道餐點嗎？此動作無法復原。')) return;
+  }
   meal.dishes.splice(dishIdx, 1);
   const k = dateKey();
   localData[k][mealId] = meal;
@@ -1495,8 +1588,179 @@ function fillDishItems(mealId, dishIdx, items) {
 }
 
 // ─── RENDER ──────────────────────────────────────────────────────
+// ─── Q1/Q2 quick-add state ───
+// Built on each render() from the current member's history. Keyed by meal id
+// so we can look up the item/source by index instead of injecting strings
+// (which would break on names containing quotes).
+var _quickAdd = { favs: [], sources: {} };
+
+// Top-N most-frequently-logged item names for the given member, with the
+// most recent seen macros as the "canonical" values.
+function computeFavorites(member, n) {
+  var counter = {};
+  Object.keys(localData).forEach(function(k) {
+    if (k.indexOf(member + '::') !== 0) return;
+    var day = localData[k] || {};
+    Object.keys(day).forEach(function(mealId) {
+      var meal = day[mealId];
+      (meal && meal.dishes || []).forEach(function(dish) {
+        (dish.items || []).forEach(function(it) {
+          var name = String((it && it.name) || '').trim();
+          if (!name) return;
+          if (!counter[name]) counter[name] = { name: name, count: 0, carb: 0, pro: 0, fat: 0 };
+          counter[name].count++;
+          // Prefer non-zero values from the latest occurrence
+          if (parseFloat(it.carb)) counter[name].carb = parseFloat(it.carb);
+          if (parseFloat(it.pro))  counter[name].pro  = parseFloat(it.pro);
+          if (parseFloat(it.fat))  counter[name].fat  = parseFloat(it.fat);
+        });
+      });
+    });
+  });
+  return Object.keys(counter)
+    .map(function(k) { return counter[k]; })
+    .filter(function(f) { return f.count >= 2; })  // ignore one-offs
+    .sort(function(a, b) { return b.count - a.count; })
+    .slice(0, n);
+}
+
+// Returns list of copyable source meals for the given meal id:
+//   1. Yesterday's same meal (if it has data)
+//   2. Most recent same-meal within last 14 days (excluding yesterday)
+function computeCopySources(mealId) {
+  var out = [];
+  var baseline = new Date(currentDate);
+  baseline.setHours(12, 0, 0, 0);
+  var seen = {};
+  // Yesterday
+  var y = new Date(baseline); y.setDate(y.getDate() - 1);
+  var yKey = currentMember + '::' + y.toISOString().slice(0,10);
+  var yMeal = (localData[yKey] || {})[mealId];
+  if (yMeal && hasMealData(yMeal)) {
+    out.push({ label: '複製昨天的' + mealNameById(mealId), key: yKey, mealId: mealId });
+    seen[yKey] = true;
+  }
+  // Most recent within last 14 days
+  for (var i = 2; i <= 14; i++) {
+    var d = new Date(baseline); d.setDate(d.getDate() - i);
+    var k = currentMember + '::' + d.toISOString().slice(0,10);
+    if (seen[k]) continue;
+    var m = (localData[k] || {})[mealId];
+    if (m && hasMealData(m)) {
+      out.push({
+        label: '複製 ' + (d.getMonth()+1) + '/' + d.getDate() + ' 的' + mealNameById(mealId),
+        key: k, mealId: mealId
+      });
+      break;
+    }
+  }
+  return out;
+}
+
+function mealNameById(id) {
+  for (var i = 0; i < MEALS_DEF.length; i++) {
+    if (MEALS_DEF[i].id === id) return MEALS_DEF[i].name;
+  }
+  return id;
+}
+
+function renderQuickAddRow(mealId, meal) {
+  var favs = _quickAdd.favs;
+  var sources = _quickAdd.sources[mealId] || [];
+  var showCopy = !hasMealData(meal);
+  if (favs.length === 0 && !(showCopy && sources.length > 0)) return '';
+  var parts = [];
+  if (showCopy && sources.length > 0) {
+    sources.forEach(function(s, i) {
+      parts.push('<button class="quick-chip copy-chip" onclick="quickCopy(\'' + mealId + '\',' + i + ')">↻ ' + escAttr(s.label) + '</button>');
+    });
+  }
+  if (favs.length > 0) {
+    parts.push('<span class="quick-label">常用：</span>');
+    favs.forEach(function(f, i) {
+      var shortName = f.name.length > 8 ? f.name.slice(0, 7) + '…' : f.name;
+      parts.push('<button class="quick-chip fav-chip" onclick="quickAddFav(\'' + mealId + '\',' + i + ')">' + escAttr(shortName) + '</button>');
+    });
+  }
+  return '<div class="quick-add-row">' + parts.join('') + '</div>';
+}
+
+function quickAddFav(mealId, idx) {
+  var f = _quickAdd.favs[idx];
+  if (!f) return;
+  harvestVisibleDishes();
+  var meal = getMeal(mealId);
+  if (!meal.dishes || meal.dishes.length === 0) {
+    meal.dishes = [{ photo: '', items: [] }];
+  }
+  var last = meal.dishes[meal.dishes.length - 1];
+  if (!last.items) last.items = [];
+  // Drop any all-blank trailing placeholder row before appending.
+  last.items = last.items.filter(function(it) {
+    return (it && it.name && String(it.name).trim())
+      || parseFloat(it && it.carb) || parseFloat(it && it.pro) || parseFloat(it && it.fat);
+  });
+  last.items.push({
+    name: f.name,
+    carb: Math.round(f.carb),
+    pro: Math.round(f.pro),
+    fat: Math.round(f.fat)
+  });
+  var k = dateKey();
+  if (!localData[k]) localData[k] = {};
+  localData[k][mealId] = meal;
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+  // Make sure the meal is expanded so the user sees their addition
+  var cardEl = document.getElementById(mealId + '-card');
+  if (cardEl) cardEl.classList.add('open');
+  rerenderDishes(mealId);
+  updateSaveBtnTotal(mealId);
+  updateBadge(mealId);
+  setSyncPending();
+  if (navigator.vibrate) navigator.vibrate(20);
+  toast('已加入「' + f.name + '」');
+}
+
+function quickCopy(mealId, srcIdx) {
+  var src = (_quickAdd.sources[mealId] || [])[srcIdx];
+  if (!src) return;
+  var sourceMeal = (localData[src.key] || {})[src.mealId];
+  if (!sourceMeal || !hasMealData(sourceMeal)) { toast('沒有可複製的資料'); return; }
+  harvestVisibleDishes();
+  var clonedDishes = (sourceMeal.dishes || []).map(function(d) {
+    return {
+      photo: '',  // skip photo — avoids Drive bloat + copyright-of-the-past concerns
+      items: (d.items || []).map(function(it) {
+        return { name: it.name || '', carb: it.carb || 0, pro: it.pro || 0, fat: it.fat || 0 };
+      })
+    };
+  }).filter(function(d) { return d.items.length > 0; });
+  if (clonedDishes.length === 0) { toast('沒有可複製的資料'); return; }
+  var meal = getMeal(mealId);
+  meal.dishes = clonedDishes;
+  meal.note = sourceMeal.note || '';
+  var k = dateKey();
+  if (!localData[k]) localData[k] = {};
+  localData[k][mealId] = meal;
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+  var cardEl = document.getElementById(mealId + '-card');
+  if (cardEl) cardEl.classList.add('open');
+  rerenderDishes(mealId);
+  updateSaveBtnTotal(mealId);
+  updateBadge(mealId);
+  updateSummary();
+  setSyncPending();
+  toast('已複製，請檢查後儲存');
+}
+
 function render() {
   formatDate();
+  // Rebuild quick-add state once per render — expensive scan, but render()
+  // is only called on navigate/save/member-switch, not per-keystroke.
+  _quickAdd.favs = computeFavorites(currentMember, 6);
+  _quickAdd.sources = {};
+  MEALS_DEF.forEach(function(m) { _quickAdd.sources[m.id] = computeCopySources(m.id); });
+
   const list = document.getElementById('meals-list');
   list.innerHTML = '';
   MEALS_DEF.forEach(function(m) {
@@ -1516,6 +1780,7 @@ function render() {
       + '<span class="meal-chevron">▾</span>'
       + '</div></div>'
       + '<div class="meal-body">'
+      + renderQuickAddRow(m.id, meal)
       + '<div id="' + m.id + '-dishes">' + renderDishes(m.id, meal.dishes) + '</div>'
       + '<button class="add-dish-btn" onclick="addDish(\'' + m.id + '\')">📷 新增一道菜</button>'
       + '<div class="note-row" style="margin-bottom:10px;">'
@@ -1595,11 +1860,11 @@ function renderFoodItems(mealId, dishIdx, items) {
     return '<div class="food-item-row">'
       + '<input class="fi-name" type="text" placeholder="食物名稱" value="' + esc(item.name) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-carb" type="number" min="0" placeholder="0" value="' + esc(item.carb) + '"'
+      + '<input class="fi-carb" type="number" inputmode="decimal" min="0" placeholder="0" value="' + esc(item.carb) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-pro" type="number" min="0" placeholder="0" value="' + esc(item.pro) + '"'
+      + '<input class="fi-pro"  type="number" inputmode="decimal" min="0" placeholder="0" value="' + esc(item.pro) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-      + '<input class="fi-fat" type="number" min="0" placeholder="0" value="' + esc(item.fat) + '"'
+      + '<input class="fi-fat"  type="number" inputmode="decimal" min="0" placeholder="0" value="' + esc(item.fat) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
       + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>'
       + '</div>';
@@ -1613,9 +1878,9 @@ function addFoodItemToDish(mealId, dishIdx) {
   const row = document.createElement('div');
   row.className = 'food-item-row';
   row.innerHTML = '<input class="fi-name" type="text" placeholder="食物名稱" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-    + '<input class="fi-carb" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-    + '<input class="fi-pro" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
-    + '<input class="fi-fat" type="number" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-carb" type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-pro"  type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<input class="fi-fat"  type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
     + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>';
   container.appendChild(row);
   if (navigator.vibrate) navigator.vibrate(20);
@@ -1797,11 +2062,29 @@ async function uploadPhoto(folderId, filename, dataUrl) {
 // conflicts are extremely rare. Caveat: a delete that drops dishCount from
 // N→0 will be reverted by a stale local copy; users can work around by
 // editing the dish to blank instead of deleting.
+function mergeRemoteProfiles(remoteProfiles) {
+  if (!remoteProfiles || typeof remoteProfiles !== 'object') return;
+  Object.keys(remoteProfiles).forEach(function(member) {
+    var r = remoteProfiles[member];
+    if (!r || typeof r !== 'object') return;
+    var l = localProfiles[member];
+    // Newer updatedAt wins; if one side lacks a timestamp, the side with
+    // one is treated as newer.
+    if (!l) { localProfiles[member] = r; return; }
+    var rTime = r.updatedAt || '';
+    var lTime = l.updatedAt || '';
+    if (rTime > lTime) localProfiles[member] = r;
+  });
+  try { localStorage.setItem('profiles', JSON.stringify(localProfiles)); } catch(_) {}
+}
+
 function mergeRemoteIntoLocal(remote) {
   if (!remote || typeof remote !== 'object') return localData;
   const result = {};
   Object.keys(localData).forEach(function(k) { result[k] = localData[k]; });
   Object.keys(remote).forEach(function(k) {
+    // Skip non-date keys (e.g. "profiles") — they're handled separately.
+    if (k.indexOf('::') === -1) return;
     if (!result[k]) { result[k] = remote[k]; return; }
     // Both sides have this date-key — merge meal by meal.
     const merged = {};
@@ -1863,6 +2146,8 @@ async function loadFromDrive() {
       driveData = await r.json();
     }
     if (driveData && typeof driveData === 'object' && !Array.isArray(driveData)) {
+      // Profiles are synced separately so they don't pollute the date-keyed map.
+      if (driveData.profiles) mergeRemoteProfiles(driveData.profiles);
       localData = mergeRemoteIntoLocal(driveData);
       try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
       render();
@@ -1874,6 +2159,11 @@ async function loadFromDrive() {
 function stripPhotosForUpload(data) {
   const noPhoto = {};
   Object.keys(data || {}).forEach(function(k) {
+    // Non-date keys (e.g. "profiles") are passed through untouched.
+    if (k.indexOf('::') === -1) {
+      noPhoto[k] = data[k];
+      return;
+    }
     noPhoto[k] = {};
     Object.keys(data[k] || {}).forEach(function(mealId) {
       const m = data[k][mealId];
@@ -1909,6 +2199,7 @@ async function syncToDrive() {
         const remote = await fetchSharedFile();
         if (remote === null) return; // signOut was called
         if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
+          if (remote.profiles) mergeRemoteProfiles(remote.profiles);
           localData = mergeRemoteIntoLocal(remote);
           try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
         }
@@ -1916,6 +2207,8 @@ async function syncToDrive() {
 
       // 2) Build photo-stripped payload from the merged localData.
       const payload = stripPhotosForUpload(localData);
+      // Attach cross-device profile map as a sibling top-level field.
+      payload.profiles = localProfiles;
 
       // 3) PATCH the shared file by ID (overwrite with merged content).
       const res = await fetch(
@@ -2082,8 +2375,11 @@ function renderProfileView() {
   document.getElementById('profile-member-tag').textContent =
     currentMember ? ('記錄成員：' + currentMember) : '';
 
-  // Load saved profile for this member (per-device)
-  var saved = safeParse(profileKey(), {}, '個人資料') || {};
+  // Load saved profile — prefer cross-device map, fall back to legacy
+  // per-device key for users who filled their profile before sync existed.
+  var saved = localProfiles[currentMember]
+           || safeParse(profileKey(), {}, '個人資料')
+           || {};
   document.getElementById('profile-height').value = saved.height || '';
   document.getElementById('profile-weight').value = saved.weight || '';
   document.getElementById('profile-gender').value = saved.gender || '';
@@ -2168,7 +2464,14 @@ function saveProfile() {
   }
   p.updatedAt = new Date().toISOString();
   try {
+    // Legacy key kept in sync for offline fallback + reads that predate the
+    // cross-device map.
     localStorage.setItem(profileKey(), JSON.stringify(p));
+    // Cross-device map — picked up by syncToDrive() and pushed into the
+    // shared file so other devices logged in as the same member will read it.
+    localProfiles[currentMember] = p;
+    localStorage.setItem('profiles', JSON.stringify(localProfiles));
+    setSyncPending(); // tell the sync bar there are new changes to push
     toast('個人資料已儲存 ✓');
   } catch(_) {
     toast('儲存失敗：空間不足');
@@ -2229,7 +2532,11 @@ function renderStatsView() {
 
   // Compare average kcal to this member's TDEE (if profile is complete).
   // Within ±10% → 綠 達標, above → 紅 偏高, below → 橘 偏低
-  var profileData = safeParse('profile::' + statsMember, {}, '個人資料') || {};
+  // Prefer the cross-device profiles map so a stats viewer who isn't the
+  // profile owner still sees the target (e.g., shunyu1123 viewing Dean).
+  var profileData = localProfiles[statsMember]
+                 || safeParse('profile::' + statsMember, {}, '個人資料')
+                 || {};
   var tdeeInfo = computeTdee(profileData);
   var kcalExtra = '';
   var kcalStatClass = 'kcal-c';
