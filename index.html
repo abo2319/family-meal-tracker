@@ -514,6 +514,42 @@ select.profile-field-input {
   cursor: pointer;
 }
 .profile-save-btn:active { opacity: 0.85; }
+
+/* Streak pill (N1) — sits in the topbar row 2 area or above summary */
+.streak-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12px; font-weight: 600;
+  padding: 4px 10px; border-radius: 99px;
+  background: linear-gradient(135deg, #FEF3C7, #FED7AA);
+  color: #92400E; border: 1px solid #FCD34D;
+  white-space: nowrap;
+}
+.streak-pill.cold { background: var(--gray-100); color: var(--gray-400); border-color: var(--gray-200); }
+.streak-pill.hot  { background: linear-gradient(135deg, #FEE2E2, #FECACA); color: #B91C1C; border-color: #FCA5A5; }
+
+/* Weekly insight card (M2) — sits between week nav and the bar chart */
+.insight-card {
+  margin: 0 16px 12px; background: #fff;
+  border-radius: var(--radius); border: 1px solid var(--gray-100);
+  padding: 12px 14px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+}
+.insight-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px; font-weight: 600; color: var(--gray-900);
+  margin-bottom: 6px;
+}
+.insight-list {
+  display: flex; flex-direction: column; gap: 5px;
+}
+.insight-item {
+  font-size: 13px; color: var(--gray-600); line-height: 1.5;
+  display: flex; align-items: flex-start; gap: 6px;
+}
+.insight-item .dot { flex: 0 0 auto; margin-top: 6px; }
+.insight-item.good .dot { color: #16A34A; }
+.insight-item.warn .dot { color: #EA580C; }
+.insight-item.bad .dot  { color: #DC2626; }
+.insight-empty { font-size: 12px; color: var(--gray-400); }
 .stats-header {
   display: flex; align-items: center; gap: 10px;
   padding: 14px 16px 10px;
@@ -618,6 +654,7 @@ select.profile-field-input {
     <div class="topbar-row1">
       <span class="app-title">🥗 家庭飲食</span>
       <div style="display:flex;align-items:center;gap:8px;">
+        <span class="streak-pill" id="streak-pill" style="display:none;"></span>
         <button class="stats-topbar-btn" onclick="showStats()">📊 統計</button>
         <div id="avatar-wrap" onclick="toggleMenu()"></div>
       </div>
@@ -669,6 +706,7 @@ select.profile-field-input {
       <span class="stats-week-label" id="stats-week-label"></span>
       <div class="stats-week-arrow" onclick="statsChangeWeek(1)">›</div>
     </div>
+    <div class="insight-card" id="stats-insight-card" style="display:none;"></div>
     <div class="stats-chart-wrap">
       <div id="stats-chart"></div>
     </div>
@@ -1901,6 +1939,7 @@ function render() {
     list.appendChild(card);
   });
   updateSummary();
+  updateStreakPill();
 }
 
 function renderDishes(mealId, dishes) {
@@ -2046,6 +2085,48 @@ function updateBadge(mealId) {
   const card  = document.getElementById(mealId + '-card');
   if (badge) { badge.textContent = has ? '已記錄' : '未記錄'; badge.className = 'meal-badge' + (has ? ' done' : ''); }
   if (card)  { card.classList.toggle('has-data', has); }
+}
+
+// ─── N1: Streak pill ─────────────────────────────────────────────
+function hasAnyDataForDay(member, d) {
+  var key = member + '::' + d.toISOString().slice(0,10);
+  var day = localData[key];
+  if (!day) return false;
+  for (var i = 0; i < MEALS_DEF.length; i++) {
+    if (hasMealData(day[MEALS_DEF[i].id])) return true;
+  }
+  return false;
+}
+
+function computeStreak(member) {
+  if (!member) return 0;
+  var cursor = new Date();
+  cursor.setHours(12, 0, 0, 0);
+  // If today has no data, start counting from yesterday (don't shame users
+  // who haven't eaten their first meal yet).
+  if (!hasAnyDataForDay(member, cursor)) {
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  var count = 0;
+  for (var i = 0; i < 400; i++) {
+    if (!hasAnyDataForDay(member, cursor)) break;
+    count++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return count;
+}
+
+function updateStreakPill() {
+  var pill = document.getElementById('streak-pill');
+  if (!pill) return;
+  if (!currentMember) { pill.style.display = 'none'; return; }
+  var n = computeStreak(currentMember);
+  if (n <= 0) { pill.style.display = 'none'; return; }
+  // Badge tier by streak length — encourage escalation without pressuring.
+  var emoji = n >= 30 ? '🏆' : (n >= 14 ? '💪' : (n >= 7 ? '🔥' : '✨'));
+  pill.className = 'streak-pill' + (n >= 14 ? ' hot' : '');
+  pill.textContent = emoji + ' ' + n + ' 天';
+  pill.style.display = '';
 }
 
 function updateSummary() {
@@ -2624,6 +2705,9 @@ function renderStatsView() {
   var label = weekData.label;
   document.getElementById('stats-week-label').textContent = label;
 
+  // M2: weekly rule-based insight card (renders between week nav and chart)
+  renderInsightCard(weekData);
+
   // Pick a default selected day for the detail section:
   //   1. Today (if today is in this week)
   //   2. Otherwise, the latest day with any data
@@ -2710,6 +2794,79 @@ function statsSelectDay(idx) {
   if (idx == null || idx < 0 || idx > 6) return;
   statsSelectedDayIdx = idx;
   renderStatsView();
+}
+
+// ─── M2: Weekly insight card ─────────────────────────────────────
+// Rule-based analyzer that reads the current week's days + the member's
+// TDEE target (if complete) and produces 2-4 plain-language bullets.
+// No AI calls here — purely arithmetic for reliability and zero cost.
+function buildInsights(weekData, tdeeInfo) {
+  var days = weekData.days || [];
+  var loggedDays = days.filter(function(d) { return d.kcal > 0; });
+  var out = [];
+  if (loggedDays.length === 0) return out;
+
+  // 1) Logging consistency
+  if (loggedDays.length < 7) {
+    out.push({ sent: 'warn', text: '本週有 ' + (7 - loggedDays.length) + ' 天沒有記錄' });
+  } else {
+    out.push({ sent: 'good', text: '本週七天都有記錄 🎉' });
+  }
+
+  // 2) Energy budget vs TDEE target
+  if (tdeeInfo && tdeeInfo.tdee > 0) {
+    var hi = tdeeInfo.tdee * 1.15;
+    var lo = tdeeInfo.tdee * 0.85;
+    var over  = loggedDays.filter(function(d) { return d.kcal > hi; }).length;
+    var under = loggedDays.filter(function(d) { return d.kcal < lo; }).length;
+    if (over >= 3) {
+      out.push({ sent: 'bad',  text: '本週有 ' + over + ' 天熱量超標（>' + Math.round(hi) + ' 大卡）' });
+    } else if (over > 0) {
+      out.push({ sent: 'warn', text: '本週有 ' + over + ' 天熱量偏高' });
+    } else if (under >= 3) {
+      out.push({ sent: 'warn', text: '本週有 ' + under + ' 天熱量偏低（<' + Math.round(lo) + ' 大卡）' });
+    } else {
+      out.push({ sent: 'good', text: '熱量控制穩定 ✓' });
+    }
+  }
+
+  // 3) Peak day
+  var peak = loggedDays.slice().sort(function(a, b) { return b.kcal - a.kcal; })[0];
+  if (peak && loggedDays.length > 1) {
+    out.push({ sent: 'neutral', text: peak.label + ' 吃最多（' + peak.kcal + ' 大卡）' });
+  }
+
+  // 4) Protein share check (Atwater: protein contributes 4 kcal/g)
+  var totalPro  = days.reduce(function(s, d) { return s + d.pro;  }, 0);
+  var totalKcal = days.reduce(function(s, d) { return s + d.kcal; }, 0);
+  if (totalKcal > 200) {
+    var proPct = (totalPro * 4) / totalKcal;
+    if (proPct < 0.10) {
+      out.push({ sent: 'warn', text: '蛋白質比例偏低（' + Math.round(proPct * 100) + '%），可加點蛋豆魚肉類' });
+    } else if (proPct > 0.35) {
+      out.push({ sent: 'warn', text: '蛋白質比例偏高（' + Math.round(proPct * 100) + '%）' });
+    }
+  }
+
+  return out.slice(0, 4);
+}
+
+function renderInsightCard(weekData) {
+  var card = document.getElementById('stats-insight-card');
+  if (!card) return;
+  var profileData = localProfiles[statsMember]
+                 || safeParse('profile::' + statsMember, {}, '個人資料')
+                 || {};
+  var tdeeInfo = computeTdee(profileData);
+  var insights = buildInsights(weekData, tdeeInfo);
+  if (insights.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  var items = insights.map(function(ins) {
+    var cls = 'insight-item' + (ins.sent && ins.sent !== 'neutral' ? ' ' + ins.sent : '');
+    return '<div class="' + cls + '"><span class="dot">●</span><span>' + escAttr(ins.text) + '</span></div>';
+  }).join('');
+  card.innerHTML = '<div class="insight-head">💡 本週洞察</div>'
+    + '<div class="insight-list">' + items + '</div>';
 }
 
 function defaultDayIdxForWeek(weekData) {
