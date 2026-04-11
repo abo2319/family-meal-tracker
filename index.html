@@ -233,6 +233,18 @@ button:active,
 .quick-chip.copy-chip:active { background: #B8EFDD; }
 .quick-chip.tpl-chip  { background: #EDE9FE; border-color: #C4B5FD; color: #5B21B6; font-weight: 600; }
 .quick-chip.tpl-chip:active { background: #DDD6FE; }
+/* B3: cross-family shared library — blue */
+.quick-chip.lib-chip  { background: #DBEAFE; border-color: #93C5FD; color: #1D4ED8; font-weight: 600; }
+.quick-chip.lib-chip:active { background: #BFDBFE; }
+
+/* B3: tiny bookmark button beside the × on each food row */
+.fi-bookmark {
+  flex: 0 0 auto; width: 24px; height: 24px; border-radius: 6px;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 13px; color: #3B82F6;
+  display: flex; align-items: center; justify-content: center;
+}
+.fi-bookmark:active { background: #DBEAFE; transform: scale(0.9); }
 
 /* M3: inline "save as template" mini-button next to 儲存這餐 */
 .save-row-wrap { display: flex; gap: 8px; padding: 12px 16px 16px; }
@@ -959,6 +971,14 @@ if (!localProfiles || typeof localProfiles !== 'object' || Array.isArray(localPr
 let localTemplates = safeParse('templates', {}, '餐點範本');
 if (!localTemplates || typeof localTemplates !== 'object' || Array.isArray(localTemplates)) {
   localTemplates = {};
+}
+// B3: Cross-family dish library. Keyed by id → { name, carb, pro, fat,
+// createdBy, createdAt }. Any single food-item row can be "bookmarked"
+// into the library via the 🔖 button, and the result shows up as a blue
+// chip for every family member via the shared Drive file.
+let localLibrary = safeParse('library', {}, '料理庫');
+if (!localLibrary || typeof localLibrary !== 'object' || Array.isArray(localLibrary)) {
+  localLibrary = {};
 }
 let driveFolderId = localStorage.getItem('driveFolderId') || null;
 let userInfo = null;
@@ -1884,8 +1904,9 @@ function renderQuickAddRow(mealId, meal) {
   var favs = _quickAdd.favs;
   var sources = _quickAdd.sources[mealId] || [];
   var templates = _quickAdd.templates || [];
+  var library = _quickAdd.library || [];
   var showCopy = !hasMealData(meal);
-  if (favs.length === 0 && templates.length === 0 && !(showCopy && sources.length > 0)) return '';
+  if (favs.length === 0 && templates.length === 0 && library.length === 0 && !(showCopy && sources.length > 0)) return '';
   var parts = [];
   if (showCopy && sources.length > 0) {
     sources.forEach(function(s, i) {
@@ -1900,6 +1921,13 @@ function renderQuickAddRow(mealId, meal) {
       parts.push('<button class="quick-chip tpl-chip" onclick="applyTemplate(\'' + mealId + '\',\'' + escAttr(t.id) + '\')">📋 ' + escAttr(shortName) + '</button>');
     });
   }
+  if (library.length > 0) {
+    parts.push('<span class="quick-label">全家：</span>');
+    library.forEach(function(lib, i) {
+      var shortName = lib.name.length > 8 ? lib.name.slice(0, 7) + '…' : lib.name;
+      parts.push('<button class="quick-chip lib-chip" onclick="quickAddLibrary(\'' + mealId + '\',\'' + escAttr(lib.id) + '\')">🔖 ' + escAttr(shortName) + '</button>');
+    });
+  }
   if (favs.length > 0) {
     parts.push('<span class="quick-label">常用：</span>');
     favs.forEach(function(f, i) {
@@ -1908,6 +1936,68 @@ function renderQuickAddRow(mealId, meal) {
     });
   }
   return '<div class="quick-add-row">' + parts.join('') + '</div>';
+}
+
+// B3: bookmark a single food row into the cross-family library
+function saveFoodItemToLibrary(btn) {
+  var row = btn.closest('.food-item-row');
+  if (!row) return;
+  var nameEl = row.querySelector('.fi-name');
+  var name = (nameEl && nameEl.value || '').trim();
+  if (!name) { toast('請先填寫食物名稱'); return; }
+  var carb = parseFloat(row.querySelector('.fi-carb').value) || 0;
+  var pro  = parseFloat(row.querySelector('.fi-pro').value)  || 0;
+  var fat  = parseFloat(row.querySelector('.fi-fat').value)  || 0;
+  // Dedupe by case-insensitive name so saving the same dish twice just
+  // refreshes its macros rather than piling up blue chips.
+  var existingId = Object.keys(localLibrary).find(function(id) {
+    return ((localLibrary[id] && localLibrary[id].name) || '').trim().toLowerCase() === name.toLowerCase();
+  });
+  var id = existingId || ('lib_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7));
+  localLibrary[id] = {
+    id: id, name: name,
+    carb: Math.round(carb), pro: Math.round(pro), fat: Math.round(fat),
+    createdBy: currentMember || '',
+    createdAt: new Date().toISOString()
+  };
+  try { localStorage.setItem('library', JSON.stringify(localLibrary)); } catch(_) {}
+  setSyncPending();
+  toast(existingId ? '料理庫已更新「' + name + '」' : '已加入全家料理庫 ✓');
+}
+
+// B3: apply a library item to the current meal (same shape as quickAddFav)
+function quickAddLibrary(mealId, libId) {
+  var lib = localLibrary[libId];
+  if (!lib) return;
+  harvestVisibleDishes();
+  var meal = getMeal(mealId);
+  if (!meal.dishes || meal.dishes.length === 0) {
+    meal.dishes = [{ photo: '', items: [] }];
+  }
+  var last = meal.dishes[meal.dishes.length - 1];
+  if (!last.items) last.items = [];
+  last.items = last.items.filter(function(it) {
+    return (it && it.name && String(it.name).trim())
+      || parseFloat(it && it.carb) || parseFloat(it && it.pro) || parseFloat(it && it.fat);
+  });
+  last.items.push({
+    name: lib.name,
+    carb: Math.round(lib.carb || 0),
+    pro: Math.round(lib.pro || 0),
+    fat: Math.round(lib.fat || 0)
+  });
+  var k = dateKey();
+  if (!localData[k]) localData[k] = {};
+  localData[k][mealId] = meal;
+  try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
+  var cardEl = document.getElementById(mealId + '-card');
+  if (cardEl) cardEl.classList.add('open');
+  rerenderDishes(mealId);
+  updateSaveBtnTotal(mealId);
+  updateBadge(mealId);
+  setSyncPending();
+  if (navigator.vibrate) navigator.vibrate(20);
+  toast('已加入「' + lib.name + '」');
 }
 
 // M3: Save current meal as a named template
@@ -2057,6 +2147,13 @@ function render() {
     .filter(function(t) { return t && t.name && (t.dishes || []).length > 0; })
     .sort(function(a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })
     .slice(0, 5);
+  // B3: surface up to 4 library items (newest first). The library is
+  // deduped by name at write-time so there should be no dupes here.
+  _quickAdd.library = Object.keys(localLibrary)
+    .map(function(id) { return localLibrary[id]; })
+    .filter(function(l) { return l && l.name; })
+    .sort(function(a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); })
+    .slice(0, 4);
 
   const list = document.getElementById('meals-list');
   list.innerHTML = '';
@@ -2175,6 +2272,7 @@ function renderFoodItems(mealId, dishIdx, items) {
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
       + '<input class="fi-fat"  type="number" inputmode="decimal" min="0" placeholder="0" value="' + esc(item.fat) + '"'
       + ' oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+      + '<button class="fi-bookmark" onclick="saveFoodItemToLibrary(this)" title="存入全家料理庫">🔖</button>'
       + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>'
       + '</div>';
   }).join('');
@@ -2190,6 +2288,7 @@ function addFoodItemToDish(mealId, dishIdx) {
     + '<input class="fi-carb" type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
     + '<input class="fi-pro"  type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
     + '<input class="fi-fat"  type="number" inputmode="decimal" min="0" placeholder="0" oninput="updateSaveBtnTotal(\'' + mealId + '\')">'
+    + '<button class="fi-bookmark" onclick="saveFoodItemToLibrary(this)" title="存入全家料理庫">🔖</button>'
     + '<button class="fi-del" onclick="delFoodItem(this,\'' + mealId + '\',' + dishIdx + ')" title="刪除">×</button>';
   container.appendChild(row);
   if (navigator.vibrate) navigator.vibrate(20);
@@ -2443,6 +2542,20 @@ function mergeRemoteTemplates(remoteTemplates) {
   try { localStorage.setItem('templates', JSON.stringify(localTemplates)); } catch(_) {}
 }
 
+function mergeRemoteLibrary(remoteLibrary) {
+  if (!remoteLibrary || typeof remoteLibrary !== 'object') return;
+  Object.keys(remoteLibrary).forEach(function(id) {
+    var r = remoteLibrary[id];
+    if (!r || typeof r !== 'object') return;
+    var l = localLibrary[id];
+    if (!l) { localLibrary[id] = r; return; }
+    var rTime = r.createdAt || '';
+    var lTime = l.createdAt || '';
+    if (rTime > lTime) localLibrary[id] = r;
+  });
+  try { localStorage.setItem('library', JSON.stringify(localLibrary)); } catch(_) {}
+}
+
 function mergeRemoteIntoLocal(remote) {
   if (!remote || typeof remote !== 'object') return localData;
   const result = {};
@@ -2514,6 +2627,7 @@ async function loadFromDrive() {
       // Profiles are synced separately so they don't pollute the date-keyed map.
       if (driveData.profiles)  mergeRemoteProfiles(driveData.profiles);
       if (driveData.templates) mergeRemoteTemplates(driveData.templates);
+      if (driveData.library)   mergeRemoteLibrary(driveData.library);
       localData = mergeRemoteIntoLocal(driveData);
       try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
       render();
@@ -2567,6 +2681,7 @@ async function syncToDrive() {
         if (remote && typeof remote === 'object' && !Array.isArray(remote)) {
           if (remote.profiles)  mergeRemoteProfiles(remote.profiles);
           if (remote.templates) mergeRemoteTemplates(remote.templates);
+          if (remote.library)   mergeRemoteLibrary(remote.library);
           localData = mergeRemoteIntoLocal(remote);
           try { localStorage.setItem('mealData', JSON.stringify(localData)); } catch(_) {}
         }
@@ -2574,10 +2689,12 @@ async function syncToDrive() {
 
       // 2) Build photo-stripped payload from the merged localData.
       const payload = stripPhotosForUpload(localData);
-      // Attach cross-device profile map + meal templates as sibling
-      // top-level fields (non-date keys are skipped in merge/strip paths).
+      // Attach cross-device profile map, meal templates, and the family
+      // dish library as sibling top-level fields. Non-date keys are
+      // skipped in merge/strip paths so they ride along untouched.
       payload.profiles  = localProfiles;
       payload.templates = localTemplates;
+      payload.library   = localLibrary;
 
       // 3) PATCH the shared file by ID (overwrite with merged content).
       const res = await fetch(
