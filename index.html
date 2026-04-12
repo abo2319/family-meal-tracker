@@ -875,18 +875,25 @@ select.profile-field-input {
 // ─── CONFIG ──────────────────────────────────────────────────────
 const CLIENT_ID = CONFIG.CLIENT_ID;
 const GEMINI_MODEL = 'gemini-2.5-flash';
-// Gemini API key lives in localStorage per-device (not in repo). CONFIG.GEMINI_API_KEY
-// is only used as a dev fallback — the skip-worktree'd local config.js may contain it.
+// Gemini API key lookup priority:
+//   1. Cross-device profile (synced via Drive → survives PWA reinstall + new devices)
+//   2. Legacy per-device localStorage key (backward compat for existing users)
+//   3. CONFIG.GEMINI_API_KEY (dev fallback from local config.js)
 function getGeminiKey() {
+  // 1. Profile-synced key (follows the member across all their devices)
+  var p = currentMember ? localProfiles[currentMember] : null;
+  if (p && p.geminiApiKey && p.geminiApiKey.trim()) return p.geminiApiKey.trim();
+  // 2. Legacy per-device key
   const saved = localStorage.getItem('geminiApiKey');
   if (saved && saved.trim()) return saved.trim();
+  // 3. Dev config fallback
   const fromConfig = CONFIG.GEMINI_API_KEY;
   if (fromConfig && fromConfig !== 'YOUR_GEMINI_API_KEY_HERE') return fromConfig;
   return '';
 }
 function promptForGeminiKey() {
   closeMenu();
-  const current = localStorage.getItem('geminiApiKey') || '';
+  const current = getGeminiKey();
   const input = prompt(
     '請貼上 Gemini API Key\n\n取得方式：https://aistudio.google.com/apikey\n（免費，用 Google 帳號即可）\n\n留空可清除目前的 key。',
     current
@@ -895,6 +902,11 @@ function promptForGeminiKey() {
   const trimmed = input.trim();
   if (!trimmed) {
     localStorage.removeItem('geminiApiKey');
+    if (currentMember && localProfiles[currentMember]) {
+      delete localProfiles[currentMember].geminiApiKey;
+      try { localStorage.setItem('profiles', JSON.stringify(localProfiles)); } catch(_) {}
+      setSyncPending();
+    }
     toast('Gemini API Key 已清除');
     return false;
   }
@@ -902,8 +914,18 @@ function promptForGeminiKey() {
     toast('Key 格式不對，應為 AIza 開頭');
     return false;
   }
+  // Save to both legacy key AND the cross-device profile so the key
+  // follows the member to any device they log in from (same as photos
+  // going to their Drive automatically).
   localStorage.setItem('geminiApiKey', trimmed);
-  toast('Gemini API Key 已儲存 ✓');
+  if (currentMember) {
+    if (!localProfiles[currentMember]) localProfiles[currentMember] = {};
+    localProfiles[currentMember].geminiApiKey = trimmed;
+    localProfiles[currentMember].updatedAt = new Date().toISOString();
+    try { localStorage.setItem('profiles', JSON.stringify(localProfiles)); } catch(_) {}
+    setSyncPending();
+  }
+  toast('Gemini API Key 已儲存 ✓（會同步到其他裝置）');
   return true;
 }
 // Full Drive scope is required because the shared meal_data.json lives in
