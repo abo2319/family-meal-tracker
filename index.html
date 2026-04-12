@@ -1679,6 +1679,27 @@ function startVoiceHint(did) {
   }
 }
 
+// ─── AI quota / error helpers ────────────────────────────────────
+function trackAiCall() {
+  var today = toLocalDateStr(new Date());
+  var key = 'aiCalls::' + today;
+  var count = parseInt(localStorage.getItem(key) || '0', 10) + 1;
+  try { localStorage.setItem(key, count.toString()); } catch(_) {}
+  if (count === 200) toast('⚠️ 今日 AI 已用 200 次，接近免費上限 (250)');
+  if (count >= 250) toast('⚠️ 今日 AI 免費配額已滿 (250)，下午 4 點重置');
+  return count;
+}
+
+function friendlyGeminiError(status, rawText) {
+  var t = String(rawText || '').toLowerCase();
+  if (status === 429 || t.indexOf('resource_exhausted') !== -1 || t.indexOf('rate limit') !== -1) {
+    return 'Gemini 今日免費配額已用完\n下午 4 點（台灣時間）會自動重置\n\n可到 aistudio.google.com/apikey\n用自己的 Google 帳號申請免費 key';
+  }
+  if (status === 403 || t.indexOf('permission') !== -1) return 'API Key 無效或已停用，請重新設定';
+  if (status === 400) return '請求格式錯誤，請聯繫管理員';
+  return 'API 錯誤 ' + status;
+}
+
 // ─── GEMINI FOOD RECOGNITION ─────────────────────────────────────
 async function recognizeFood(mealId, dishIdx) {
   // CRITICAL: harvest DOM → model BEFORE anything else, so any rows the
@@ -1782,8 +1803,9 @@ async function recognizeFood(mealId, dishIdx) {
 
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error('Gemini API ' + res.status + ': ' + errText.slice(0, 200));
+      throw { status: res.status, raw: errText, friendly: friendlyGeminiError(res.status, errText) };
     }
+    trackAiCall();
 
     const data = await res.json();
     const textContent = data && data.candidates && data.candidates[0]
@@ -1797,20 +1819,16 @@ async function recognizeFood(mealId, dishIdx) {
     }
 
     appendDishItems(mealId, dishIdx, parsed.items);
-    // Clear the hint field on success so the next AI run starts fresh.
-    // This is the visual signal "your typed text became rows just now".
-    // We only clear on success so a failed run keeps the hint for retry.
     if (hintEl) {
       hintEl.value = '';
-      // Re-evaluate AI button state now that hint is empty (it stays
-      // enabled because we just added rows, meaning there's content to work with).
       onHintInput(mealId, dishIdx);
     }
     toast('已新增 ' + parsed.items.length + ' 項食物 ✓');
     if (navigator.vibrate) navigator.vibrate(40);
   } catch (err) {
     console.error('Gemini error:', err);
-    toast('AI 識別失敗：' + (err.message || err));
+    var msg = (err && err.friendly) ? err.friendly : (err && err.message) || String(err);
+    toast(msg);
   } finally {
     btn.disabled = false;
     btn.classList.remove('loading');
@@ -3438,13 +3456,19 @@ function buildInsights(weekData, tdeeInfo) {
 
 // ─── B2: Gemini weekly coach ─────────────────────────────────────
 function coachCacheKey(member, weekData) {
-  // Use the first day of the week (Monday) as the cache key so swapping
-  // between adjacent days in the same week reuses the same report.
   var first = weekData && weekData.days && weekData.days[0];
-  var weekKey = first ? first.dateStr : new Date().toISOString().slice(0,10);
+  var weekKey = first ? first.dateStr : toLocalDateStr(new Date());
   return 'coach::' + member + '::' + weekKey;
 }
 
+// Auto-trigger logic: the coach report for LAST WEEK auto-generates when:
+//   1. The user is looking at the PREVIOUS week (statsWeekOffset === -1) OR
+//      it's Monday+ of the current week (so last week is "done")
+//   2. Last week has >= 5 days logged
+//   3. No cached report exists for that week yet
+//   4. The user has a Gemini key
+// This replaces the old "button to generate" flow for weekly reports. The
+// user never has to think about it — it just appears on Monday.
 function renderCoachCard(weekData) {
   var card = document.getElementById('stats-coach-card');
   if (!card) return;
@@ -3455,17 +3479,34 @@ function renderCoachCard(weekData) {
   var cacheKey = coachCacheKey(statsMember, weekData);
   var cached = safeParse(cacheKey, null, 'AI 週報');
   if (cached && cached.good) {
-    card.innerHTML = buildCoachHtml(cached, true);
+    card.innerHTML = buildCoachHtml(cached);
+    return;
+  }
+
+  // Auto-trigger conditions: past week + enough data + has key
+  var isPastWeek = statsWeekOffset < 0;
+  var isNewWeekStarted = (new Date().getDay() || 7) >= 1 && statsWeekOffset === 0;
+  // For current week (offset 0): auto-generate for PREVIOUS week if today
+  // is Monday+ and the user happens to be on current-week view. But we
+  // need previous week's data for that. Skip auto-gen for current week —
+  // only auto-gen when viewing past weeks.
+  var shouldAutoGen = isPastWeek && loggedDays >= 5 && !!getGeminiKey();
+
+  if (shouldAutoGen) {
+    // Fire and forget — card will re-render when done
+    generateCoachReport(false);
+  } else if (loggedDays >= 5 && !isPastWeek) {
+    card.innerHTML = '<div class="coach-head">'
+      + '<span class="coach-title">✨ AI 週報</span></div>'
+      + '<div class="coach-empty">本週結束後會自動產生飲食報告</div>';
   } else {
     card.innerHTML = '<div class="coach-head">'
-      + '<span class="coach-title">✨ AI 週報教練</span>'
-      + '<button class="coach-btn" onclick="generateCoachReport()">產生本週報告</button>'
-      + '</div>'
-      + '<div class="coach-empty">讓 Gemini 幫你分析這週吃得怎麼樣，並建議下週菜單</div>';
+      + '<span class="coach-title">✨ AI 週報</span></div>'
+      + '<div class="coach-empty">記錄 5 天以上可自動產生週報</div>';
   }
 }
 
-function buildCoachHtml(report, fromCache) {
+function buildCoachHtml(report) {
   var when = report.generatedAt
     ? new Date(report.generatedAt).toLocaleString('zh-TW', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' })
     : '';
@@ -3474,81 +3515,60 @@ function buildCoachHtml(report, fromCache) {
       + (s.reason ? '　' + escAttr(s.reason) : '') + '</div>';
   }).join('');
   return '<div class="coach-head">'
-    + '<span class="coach-title">✨ AI 週報教練</span>'
-    + '<button class="coach-btn" onclick="generateCoachReport(true)">↻ 重新產生</button>'
+    + '<span class="coach-title">✨ AI 週報</span>'
     + '</div>'
-    + (report.good ? '<div class="coach-section"><div class="coach-section-label">👍 做得好的地方</div><div class="coach-section-body">' + escAttr(report.good) + '</div></div>' : '')
-    + (report.improve ? '<div class="coach-section"><div class="coach-section-label">💡 可以改進的地方</div><div class="coach-section-body">' + escAttr(report.improve) + '</div></div>' : '')
-    + (sugList ? '<div class="coach-section"><div class="coach-section-label">🍽️ 下週建議菜單</div><div class="coach-sug-list">' + sugList + '</div></div>' : '')
-    + (when ? '<div class="coach-timestamp">產生於 ' + when + (fromCache ? '（本週快取）' : '') + '</div>' : '');
+    + (report.good ? '<div class="coach-section"><div class="coach-section-label">👍 做得好</div><div class="coach-section-body">' + escAttr(report.good) + '</div></div>' : '')
+    + (report.improve ? '<div class="coach-section"><div class="coach-section-label">💡 建議</div><div class="coach-section-body">' + escAttr(report.improve) + '</div></div>' : '')
+    + (sugList ? '<div class="coach-section"><div class="coach-section-label">🍽️ 推薦</div><div class="coach-sug-list">' + sugList + '</div></div>' : '')
+    + (when ? '<div class="coach-timestamp">' + when + '</div>' : '');
 }
 
 async function generateCoachReport(forceFresh) {
   var key = getGeminiKey();
-  if (!key) {
-    var ok = promptForGeminiKey();
-    if (!ok) return;
-    key = getGeminiKey();
-    if (!key) return;
-  }
+  if (!key) return; // silently skip if no key (auto-trigger path)
+
   var weekData = buildWeekData(statsMember, statsWeekOffset);
   var cacheKey = coachCacheKey(statsMember, weekData);
   if (!forceFresh) {
     var existing = safeParse(cacheKey, null, 'AI 週報');
-    if (existing && existing.good) {
-      renderCoachCard(weekData);
-      return;
-    }
+    if (existing && existing.good) return;
   }
   var card = document.getElementById('stats-coach-card');
   if (card) {
-    card.innerHTML = '<div class="coach-head"><span class="coach-title">✨ AI 週報教練</span>'
-      + '<button class="coach-btn" disabled>分析中...</button></div>'
-      + '<div class="coach-empty">Gemini 正在閱讀你這週的飲食記錄...</div>';
+    card.innerHTML = '<div class="coach-head"><span class="coach-title">✨ AI 週報</span></div>'
+      + '<div class="coach-empty">正在產生週報...</div>';
   }
 
-  // Build a compact textual summary of the week for the prompt
+  // Compact week summary — minimal tokens, just facts
   var lines = [];
   (weekData.days || []).forEach(function(d) {
+    if (d.kcal <= 0) return; // skip unlogged days entirely
     var dayKey = statsMember + '::' + d.dateStr;
     var dayData = localData[dayKey] || {};
-    var mealLines = [];
+    var parts = [];
     MEALS_DEF.forEach(function(def) {
       var meal = dayData[def.id];
       if (!meal || !hasMealData(meal)) return;
       var names = collectMealItemNames(meal);
-      var kcal = mealKcal(meal);
-      mealLines.push('  ' + def.name + '（' + kcal + '大卡）：' + (names.length ? names.join('、') : '—'));
+      if (names.length) parts.push(def.name + ':' + names.join(','));
     });
-    if (mealLines.length > 0) {
-      lines.push(d.label + '  [' + d.kcal + ' 大卡  碳' + d.carb + 'g 蛋' + d.pro + 'g 脂' + d.fat + 'g]');
-      lines.push(mealLines.join('\n'));
-    } else {
-      lines.push(d.label + '  (未記錄)');
-    }
+    lines.push(d.label + ' ' + d.kcal + 'kcal C' + d.carb + '/P' + d.pro + '/F' + d.fat + ' ' + parts.join(' '));
   });
-  var weekSummary = lines.join('\n');
 
   var profile = localProfiles[statsMember]
-             || safeParse('profile::' + statsMember, {}, '個人資料')
-             || {};
+             || safeParse('profile::' + statsMember, {}, '個人資料') || {};
   var tdeeInfo = computeTdee(profile);
-  var profileLine = '';
-  if (profile.height && profile.weight) {
-    profileLine = '成員資料：' + statsMember
-      + '，' + profile.height + 'cm，' + profile.weight + 'kg'
-      + (profile.gender === 'male' ? '，男性' : (profile.gender === 'female' ? '，女性' : ''))
-      + (tdeeInfo ? '，每日建議熱量 ' + tdeeInfo.tdee + ' 大卡' : '');
-  }
+  var pLine = '';
+  if (tdeeInfo) pLine = statsMember + ' ' + profile.height + 'cm/' + profile.weight + 'kg TDEE=' + tdeeInfo.tdee;
 
-  var prompt = '你是一位友善、溫和、說話像家人的台灣營養師。\n\n'
-    + profileLine + '\n\n'
-    + '以下是最近一週的飲食記錄：\n\n' + weekSummary + '\n\n'
-    + '請以繁體中文輸出一份簡短報告，分三個部分：\n'
-    + '1. good：「做得好的地方」— 2-3 句，具體指出這週飲食裡值得肯定的點。\n'
-    + '2. improve：「可以改進的地方」— 2-3 句，用溫和語氣提醒，不要批判。避免使用「過量」「超標」等嚇人字眼，改用「稍微多了一點」「可以再少一點」。\n'
-    + '3. suggestions：「下週建議菜單」— 列出 3 道台灣家常料理，每道包含 name（菜名，例：蒸蛋豆腐）和 reason（為什麼推薦，1 句話，說明對這位成員的好處）。\n\n'
-    + '讀者是台灣家庭的長輩，語氣要像孫子跟阿嬤講話那樣親切，不要像醫生下指令。';
+  // Short, direct prompt — token-efficient
+  var prompt = '台灣營養師，條列式繁中。' + (pLine ? '\n' + pLine : '') + '\n\n'
+    + lines.join('\n') + '\n\n'
+    + '回傳三段：\n'
+    + '1. good：1-2句，具體肯定。\n'
+    + '2. improve：1-2句，溫和建議，不用嚇人用字。\n'
+    + '3. suggestions：3道台灣家常料理，每道name+reason(1句)。\n'
+    + '不用客套開場白，直接講重點。';
 
   var body = {
     contents: [{ parts: [{ text: prompt }] }],
@@ -3581,7 +3601,11 @@ async function generateCoachReport(forceFresh) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error('API ' + res.status + ': ' + (await res.text()).slice(0, 200));
+    if (!res.ok) {
+      var errText = await res.text();
+      throw { status: res.status, raw: errText, friendly: friendlyGeminiError(res.status, errText) };
+    }
+    trackAiCall();
     var data = await res.json();
     var txt = data && data.candidates && data.candidates[0] && data.candidates[0].content
       && data.candidates[0].content.parts && data.candidates[0].content.parts[0]
@@ -3591,11 +3615,15 @@ async function generateCoachReport(forceFresh) {
     parsed.generatedAt = new Date().toISOString();
     try { localStorage.setItem(cacheKey, JSON.stringify(parsed)); } catch(_) {}
     renderCoachCard(weekData);
-    toast('AI 週報已產生 ✓');
   } catch (e) {
     console.error('Coach error:', e);
-    toast('週報產生失敗：' + (e.message || e));
-    renderCoachCard(weekData);
+    var msg = (e && e.friendly) ? e.friendly : (e && e.message) || String(e);
+    toast('週報：' + msg);
+    // Show fallback UI
+    if (card) {
+      card.innerHTML = '<div class="coach-head"><span class="coach-title">✨ AI 週報</span></div>'
+        + '<div class="coach-empty">產生失敗，稍後會自動重試</div>';
+    }
   }
 }
 
