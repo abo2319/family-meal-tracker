@@ -1218,12 +1218,24 @@ function changeDate(d) {
   render();
 }
 
+// Format a Date as YYYY-MM-DD using LOCAL time components. Using
+// .toISOString().slice(0,10) is wrong because it converts to UTC first —
+// for Taiwan (+8) any time between 00:00–08:00 local lands on the previous
+// UTC day, so "今天 4/12 08:00 Taiwan" silently becomes the 4/11 storage
+// bucket. That's the root cause of the "今天出現昨天資料" bug.
+function toLocalDateStr(d) {
+  var y = d.getFullYear();
+  var m = String(d.getMonth() + 1).padStart(2, '0');
+  var day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
 function dateKey() {
   // Belt-and-suspenders: make sure currentMember is always a real member so
   // we never write data under a ghost pointer (e.g., after empty-members
   // tampering or a Drive sync that removed the member).
   ensureValidMember();
-  return currentMember + '::' + currentDate.toISOString().slice(0,10);
+  return currentMember + '::' + toLocalDateStr(currentDate);
 }
 
 function formatDate() {
@@ -1569,7 +1581,7 @@ function handlePhoto(mealId, dishIdx, input) {
         try {
           toast('上傳照片至 Drive...');
           const fid = await ensureFolder();
-          const dateStr = currentDate.toISOString().slice(0,10);
+          const dateStr = toLocalDateStr(currentDate);
           const photoFid = await ensurePhotoFolder(fid, dateStr);
           const fname = currentMember + '_' + mealId + '_' + dishIdx + '.jpg';
           await uploadPhoto(photoFid, fname, photoDataUrl);
@@ -1669,6 +1681,12 @@ function startVoiceHint(did) {
 
 // ─── GEMINI FOOD RECOGNITION ─────────────────────────────────────
 async function recognizeFood(mealId, dishIdx) {
+  // CRITICAL: harvest DOM → model BEFORE anything else, so any rows the
+  // user typed/added (manually, via chip, or from a previous AI run) are
+  // preserved. Without this, a second AI run silently wipes any unsaved
+  // manual typing because the subsequent append reads from stale model.
+  harvestVisibleDishes();
+
   let apiKey = getGeminiKey();
   if (!apiKey) {
     // First-run: prompt user to paste their key. Retry on success.
@@ -1778,8 +1796,17 @@ async function recognizeFood(mealId, dishIdx) {
       throw new Error('沒有識別到任何食物');
     }
 
-    fillDishItems(mealId, dishIdx, parsed.items);
-    toast('AI 已識別 ' + parsed.items.length + ' 項食物 ✓');
+    appendDishItems(mealId, dishIdx, parsed.items);
+    // Clear the hint field on success so the next AI run starts fresh.
+    // This is the visual signal "your typed text became rows just now".
+    // We only clear on success so a failed run keeps the hint for retry.
+    if (hintEl) {
+      hintEl.value = '';
+      // Re-evaluate AI button state now that hint is empty (it stays
+      // enabled because we just added rows, meaning there's content to work with).
+      onHintInput(mealId, dishIdx);
+    }
+    toast('已新增 ' + parsed.items.length + ' 項食物 ✓');
     if (navigator.vibrate) navigator.vibrate(40);
   } catch (err) {
     console.error('Gemini error:', err);
@@ -1791,25 +1818,51 @@ async function recognizeFood(mealId, dishIdx) {
   }
 }
 
-function fillDishItems(mealId, dishIdx, items) {
+// Append AI-parsed items to the dish's existing items. Must be called
+// AFTER harvestVisibleDishes() so existing model state is up to date.
+//
+// Previous behaviour was to overwrite meal.dishes[dishIdx].items entirely,
+// which silently destroyed any rows that came from:
+//   - a previous AI run
+//   - manual typing the user hadn't saved yet
+//   - chip-inserted rows (favorites / library / templates)
+// Now we preserve everything except truly-blank placeholder rows.
+function appendDishItems(mealId, dishIdx, items) {
   const did = mealId + '-dish-' + dishIdx;
   const container = document.getElementById(did + '-items');
   if (!container) return;
-  // Build raw (unescaped) items — renderFoodItems handles escaping internally now.
-  const raw = items.map(function(it) {
+  // Normalize incoming items (Gemini → our schema + sane bounds).
+  const incoming = items.map(function(it) {
     return {
-      name: String(it.name || ''),
-      carb: Math.max(0, Math.round(Number(it.carb) || 0)),
-      pro:  Math.max(0, Math.round(Number(it.pro)  || 0)),
-      fat:  Math.max(0, Math.round(Number(it.fat)  || 0))
+      name: String((it && it.name) || '').trim(),
+      carb: Math.max(0, Math.round(Number(it && it.carb) || 0)),
+      pro:  Math.max(0, Math.round(Number(it && it.pro)  || 0)),
+      fat:  Math.max(0, Math.round(Number(it && it.fat)  || 0))
     };
+  }).filter(function(it) {
+    // Drop rows Gemini returned with no meaningful content at all.
+    return it.name || it.carb || it.pro || it.fat;
   });
-  // Persist to the model + localStorage so a subsequent re-render (e.g., after
-  // removeDish / addDish) doesn't wipe the AI-populated items.
+  if (incoming.length === 0) return;
+
   const meal = getMeal(mealId);
   if (!meal.dishes[dishIdx]) meal.dishes[dishIdx] = { photo: '', items: [] };
-  meal.dishes[dishIdx].items = raw;
+  // Filter out blank placeholder rows from the existing list so they don't
+  // end up sandwiched between the old AI results and the new ones. A blank
+  // row is defined as name === '' AND all three macros being 0/empty.
+  const existing = (meal.dishes[dishIdx].items || []).filter(function(it) {
+    if (!it) return false;
+    var hasName  = it.name && String(it.name).trim() !== '';
+    var hasMacro = (parseFloat(it.carb) || 0) > 0
+                || (parseFloat(it.pro)  || 0) > 0
+                || (parseFloat(it.fat)  || 0) > 0;
+    return hasName || hasMacro;
+  });
+  const merged = existing.concat(incoming);
+  meal.dishes[dishIdx].items = merged;
+
   const k = dateKey();
+  if (!localData[k]) localData[k] = {};
   localData[k][mealId] = meal;
   try {
     localStorage.setItem('mealData', JSON.stringify(localData));
@@ -1817,7 +1870,7 @@ function fillDishItems(mealId, dishIdx, items) {
     console.warn('localStorage quota:', e);
   }
   setSyncPending();
-  container.innerHTML = renderFoodItems(mealId, dishIdx, raw);
+  container.innerHTML = renderFoodItems(mealId, dishIdx, merged);
   updateSaveBtnTotal(mealId);
   updateSummary();
   updateBadge(mealId);
